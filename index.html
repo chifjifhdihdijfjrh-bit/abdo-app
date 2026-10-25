@@ -1,1139 +1,665 @@
-
-"use strict";
-
-/*
-  احرس عائلتك مع عبده
-  Single-file Node.js application.
-  Requirements: Node.js 20+
-  Run: node server.js
-
-  Features:
-  - Pair parent and child phones over the internet.
-  - Short-lived, single-use pairing codes.
-  - Persistent sessions and pairing data in data.json.
-  - Optional, consent-based location and battery sharing.
-  - Parent can unlink a paired device.
-  - No covert camera, microphone, messaging, or device-control features.
-*/
-
-const http = require("node:http");
-const fs = require("node:fs");
-const path = require("node:path");
-const crypto = require("node:crypto");
-
-const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || "0.0.0.0";
-const DATA_FILE = path.join(__dirname, "data.json");
-const CODE_LIFETIME = 10 * 60 * 1000;
-const MAX_BODY = 16 * 1024;
-
-function makeId(bytes = 24) {
-  return crypto.randomBytes(bytes).toString("hex");
-}
-
-function hash(value) {
-  return crypto.createHash("sha256").update(value).digest("hex");
-}
-
-function safeEqual(a, b) {
-  const aa = Buffer.from(String(a));
-  const bb = Buffer.from(String(b));
-  return aa.length === bb.length && crypto.timingSafeEqual(aa, bb);
-}
-
-function freshState() {
-  return {
-    devices: {},
-    sessions: {},
-    pairs: {},
-    codes: {}
-  };
-}
-
-function loadState() {
-  try {
-    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    return {
-      devices: parsed.devices || {},
-      sessions: parsed.sessions || {},
-      pairs: parsed.pairs || {},
-      codes: parsed.codes || {}
-    };
-  } catch {
-    return freshState();
-  }
-}
-
-let db = loadState();
-
-function saveState() {
-  const temp = DATA_FILE + ".tmp";
-  fs.writeFileSync(temp, JSON.stringify(db, null, 2), {
-    mode: 0o600
-  });
-  fs.renameSync(temp, DATA_FILE);
-}
-
-function cleanExpiredCodes() {
-  const now = Date.now();
-  let changed = false;
-
-  for (const [code, item] of Object.entries(db.codes)) {
-    if (!item || item.expiresAt <= now) {
-      delete db.codes[code];
-      changed = true;
-    }
-  }
-
-  if (changed) saveState();
-}
-
-function json(res, status, payload) {
-  res.writeHead(status, {
-    "Content-Type": "application/json; charset=utf-8",
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer"
-  });
-  res.end(JSON.stringify(payload));
-}
-
-function html(res, content) {
-  res.writeHead(200, {
-    "Content-Type": "text/html; charset=utf-8",
-    "Cache-Control": "no-store",
-    "X-Content-Type-Options": "nosniff",
-    "Referrer-Policy": "no-referrer",
-    "Content-Security-Policy":
-      "default-src 'self'; script-src 'unsafe-inline'; " +
-      "style-src 'unsafe-inline'; connect-src 'self'; " +
-      "img-src 'self' data:; base-uri 'none'; frame-ancestors 'none'"
-  });
-  res.end(content);
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    let body = "";
-    let size = 0;
-
-    req.on("data", chunk => {
-      size += chunk.length;
-      if (size > MAX_BODY) {
-        reject(new Error("BODY_TOO_LARGE"));
-        req.destroy();
-        return;
-      }
-      body += chunk.toString("utf8");
-    });
-
-    req.on("end", () => {
-      if (!body) return resolve({});
-      try {
-        resolve(JSON.parse(body));
-      } catch {
-        reject(new Error("INVALID_JSON"));
-      }
-    });
-
-    req.on("error", reject);
-  });
-}
-
-function getBearer(req) {
-  const header = req.headers.authorization || "";
-  const match = /^Bearer\s+([a-f0-9]{48})$/i.exec(header);
-  return match ? match[1] : "";
-}
-
-function getSession(req, role) {
-  const token = getBearer(req);
-  if (!token) return null;
-
-  const session = db.sessions[hash(token)];
-  if (!session || session.role !== role) return null;
-
-  return { tokenHash: hash(token), ...session };
-}
-
-function issueSession(role, fields = {}) {
-  const token = makeId(24);
-  db.sessions[hash(token)] = {
-    role,
-    createdAt: Date.now(),
-    ...fields
-  };
-  return token;
-}
-
-function findPairForChild(deviceId) {
-  return Object.entries(db.pairs).find(
-    ([, pair]) => pair.childDeviceId === deviceId
-  );
-}
-
-function createPairingCode(deviceId) {
-  cleanExpiredCodes();
-
-  for (let i = 0; i < 100; i++) {
-    const code = String(crypto.randomInt(100000, 1000000));
-
-    if (!db.codes[code]) {
-      db.codes[code] = {
-        childDeviceId: deviceId,
-        expiresAt: Date.now() + CODE_LIFETIME
-      };
-
-      saveState();
-
-      return {
-        code,
-        expiresAt: db.codes[code].expiresAt
-      };
-    }
-  }
-
-  throw new Error("COULD_NOT_CREATE_CODE");
-}
-
-/* Basic in-memory throttling for pairing attempts. */
-const attempts = new Map();
-
-function allowedAttempt(ip) {
-  const now = Date.now();
-  let record = attempts.get(ip);
-
-  if (!record || now - record.start > 10 * 60 * 1000) {
-    record = { start: now, count: 0 };
-    attempts.set(ip, record);
-  }
-
-  record.count++;
-  return record.count <= 12;
-}
-
-function findPairForParent(session) {
-  if (!session.pairId) return null;
-  return db.pairs[session.pairId] || null;
-}
-
-function getChildDevice(pair) {
-  return db.devices[pair.childDeviceId] || null;
-}
-
-function deviceSummary(device) {
-  const t = device && device.telemetry;
-  return {
-    label: device?.label || "هاتف الابن",
-    sharing: Boolean(device?.sharing),
-    lastSeen: device?.lastSeen || null,
-    location: t?.location || null,
-    battery: Number.isFinite(t?.battery) ? t.battery : null,
-    batteryCharging:
-      typeof t?.batteryCharging === "boolean"
-        ? t.batteryCharging
-        : null
-  };
-}
-
-function fail(res, status, message) {
-  return json(res, status, { ok: false, error: message });
-}
-
-const PAGE = String.raw`<!doctype html>
+<!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="theme-color" content="#101820">
-<title>احرس عائلتك مع عبده</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#090d16">
+<title>عبده AI Video Studio Pro</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+
 <style>
-:root{
-  color-scheme:dark;
-  --bg:#0b1118;--panel:#131d28;--panel2:#192635;
-  --line:#29394a;--text:#f4f7fb;--muted:#a7b5c5;
-  --green:#27d17f;--blue:#55a8ff;--red:#ff5c69;--gold:#ffd66b
-}
+:root{--bg:#090d16;--card:#111827;--border:#263247;--cyan:#06b6d4;--purple:#7c3aed;--pink:#ec4899;--text:#f9fafb;--muted:#9ca3af}
 *{box-sizing:border-box}
-body{
-  margin:0;background:radial-gradient(ellipse at top,#172638,var(--bg) 60%);
-  color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
-  min-height:100vh
-}
+body{margin:0;background:var(--bg);color:var(--text);font-family:Cairo,sans-serif}
 button,input{font:inherit}
 button{cursor:pointer}
-button:disabled{opacity:.5;cursor:not-allowed}
-header{
-  padding:18px 16px;border-bottom:1px solid var(--line);
-  display:flex;justify-content:space-between;align-items:center;gap:10px
-}
-.brand{font-weight:900;font-size:19px}
-.brand span{color:var(--green)}
-.pill{font-size:12px;color:var(--green);border:1px solid #236d50;padding:5px 9px;border-radius:99px}
-main{width:min(720px,100%);margin:auto;padding:18px 14px 40px}
-h1{font-size:26px;line-height:1.4;margin:10px 0}
-h2{font-size:19px;margin:0 0 10px}
-p{color:var(--muted);line-height:1.8}
-.card{
-  background:linear-gradient(145deg,var(--panel),#101923);
-  border:1px solid var(--line);border-radius:20px;padding:18px;
-  margin:14px 0;box-shadow:0 12px 30px #0002
-}
-.grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.role{
-  padding:22px 12px;text-align:center;border-radius:16px;
-  border:1px solid var(--line);background:var(--panel2);color:var(--text)
-}
-.role b{display:block;font-size:19px;margin:8px}
-.role .emoji{font-size:34px}
-button.primary,button.secondary,button.danger{
-  width:100%;padding:13px 14px;border-radius:12px;border:0;
-  font-weight:800;margin-top:10px
-}
-.primary{background:var(--green);color:#062315}
-.secondary{background:#263a50;color:white;border:1px solid #40566c!important}
-.danger{background:#51242c;color:#ffe6e9;border:1px solid #803541!important}
-input{
-  display:block;width:100%;background:#0b131d;border:1px solid #3a4c60;
-  color:white;border-radius:12px;padding:14px;margin:10px 0;outline:none
-}
-input:focus{border-color:var(--blue)}
-.code{
-  font-size:35px;letter-spacing:8px;font-weight:900;text-align:center;
-  color:var(--gold);padding:15px;background:#0a1119;border-radius:14px;
-  direction:ltr
-}
-.stat{background:#0b141e;border:1px solid var(--line);padding:14px;border-radius:14px}
-.stat small{display:block;color:var(--muted);margin-bottom:7px}
-.stat strong{font-size:18px;overflow-wrap:anywhere}
-.muted{color:var(--muted);font-size:13px;line-height:1.8}
-.ok{color:var(--green)}.warn{color:var(--gold)}.bad{color:var(--red)}
-.hidden{display:none!important}
-.notice{padding:12px;border-radius:12px;background:#1b2d3d;color:#dcecff;line-height:1.8}
-#toast{position:fixed;bottom:18px;left:12px;right:12px;max-width:550px;margin:auto;
-background:#23384a;padding:13px 15px;border-radius:12px;display:none;z-index:10}
-footer{text-align:center;color:#8493a4;font-size:12px;padding:12px}
-@media(max-width:420px){
-  .grid{grid-template-columns:1fr}
-  h1{font-size:23px}
-  .code{font-size:29px;letter-spacing:6px}
-}
+header{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;background:#111827f5;border-bottom:1px solid var(--border)}
+.logo{font-size:clamp(15px,3vw,22px);font-weight:900;color:#67e8f9}
+.badge{background:linear-gradient(120deg,var(--purple),var(--pink));border-radius:30px;padding:5px 10px;font-size:11px}
+.studio{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;padding:16px;max-width:1450px;margin:auto}
+.sidebar,.panel{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:16px}
+.sidebar{display:flex;flex-direction:column;gap:10px}
+.section-title{font-weight:800;color:#cbd5e1;margin-bottom:6px}
+.ai-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:right;color:white;background:#ffffff06;border:1px solid var(--border);border-radius:10px;padding:12px}
+.ai-btn:hover,.ai-btn.active{border-color:var(--cyan);background:#06b6d41a}
+.ai-btn i{color:#67e8f9}
+.workspace{display:flex;flex-direction:column;gap:15px;min-width:0}
+.player{position:relative;background:#000;border:1px solid var(--border);border-radius:14px;overflow:hidden;min-height:250px;height:min(55vw,480px);display:flex;align-items:center;justify-content:center}
+.drop-zone{width:90%;min-height:190px;padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;border:2px dashed var(--purple);border-radius:14px;background:#7c3aed0b;cursor:pointer}
+.drop-zone.dragging{border-color:var(--cyan);background:#06b6d422}
+.drop-zone i{font-size:45px;color:var(--cyan)}
+.drop-zone h2{font-size:19px;margin:0}
+.muted{color:var(--muted);font-size:13px}
+#videoPlayer{display:none;width:100%;height:100%;max-height:100%;object-fit:contain;background:#000}
+#captionPreview{display:none;position:absolute;bottom:55px;left:5%;right:5%;text-align:center;font-size:clamp(16px,3vw,28px);font-weight:900;color:white;text-shadow:2px 2px 4px #000,-2px -2px 4px #000;pointer-events:none;white-space:pre-wrap}
+.overlay{display:none;position:absolute;inset:0;z-index:5;background:#090d16ed;align-items:center;justify-content:center;flex-direction:column;gap:15px;text-align:center;padding:20px}
+.spinner{width:45px;height:45px;border:4px solid #ffffff25;border-top-color:var(--cyan);border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.progress-track{width:min(400px,90%);height:9px;border-radius:20px;background:#263247;overflow:hidden}
+#progressBar{width:0;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple));transition:width .15s}
+.panel{display:flex;flex-direction:column;gap:15px}
+.row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+h3{margin:0;font-size:16px}
+.primary,.secondary{border-radius:9px;padding:10px 15px;font-weight:800}
+.primary{border:0;color:white;background:linear-gradient(120deg,var(--purple),var(--pink))}
+.secondary{background:#ffffff08;border:1px solid var(--border);color:white}
+button:disabled{opacity:.45;cursor:not-allowed}
+.tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.field{display:flex;flex-direction:column;gap:6px}
+.field label{font-size:13px;color:#cbd5e1}
+.field input[type=text],.field input[type=number]{width:100%;padding:10px;border-radius:8px;color:white;background:#090d16;border:1px solid var(--border)}
+.field input[type=range]{width:100%;accent-color:var(--cyan)}
+.status{background:#090d16;border:1px solid var(--border);padding:12px;border-radius:10px;font-size:13px;overflow-wrap:anywhere}
+#message{color:#a5f3fc}
+footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
+@media(max-width:800px){.studio{grid-template-columns:1fr;padding:10px}.player{height:56vw;min-height:230px;max-height:400px}.tools{grid-template-columns:1fr}header{padding:12px}}
 </style>
 </head>
+
 <body>
 <header>
-  <div class="brand">🛡️ احرس عائلتك <span>مع عبده</span></div>
-  <div class="pill">اتصال آمن</div>
+  <div class="logo"><i class="fa-solid fa-wand-magic-sparkles"></i> عبده AI Video Studio</div>
+  <div class="badge"><i class="fa-solid fa-film"></i> محرر الفيديو</div>
 </header>
-<main>
-  <section id="home">
-    <h1>حماية عائلتك تبدأ بالربط الآمن</h1>
-    <p>اختار نوع الهاتف. يمكن للأب والابن الاتصال من شبكتين مختلفتين عن طريق السيرفر.</p>
-    <div class="grid">
-      <button class="role" id="chooseParent">
-        <span class="emoji">👨‍👧</span>
-        <b>تليفون الأب</b>
-        <span class="muted">إدخال كود الربط</span>
-      </button>
-      <button class="role" id="chooseChild">
-        <span class="emoji">📱</span>
-        <b>تليفون الابن</b>
-        <span class="muted">إنشاء كود الربط</span>
-      </button>
-    </div>
-    <div class="card">
-      <h2>إزاي بيشتغل؟</h2>
-      <p class="muted">الابن ينشئ كودًا مؤقتًا ويعطيه للأب. بعد الربط يظل الجهازان مرتبطين حتى إلغاء الربط. مشاركة الموقع أو البطارية اختيارية وتتطلب موافقة الهاتف الذي يشارك البيانات.</p>
-    </div>
-  </section>
 
-  <section id="childScreen" class="hidden">
-    <button class="secondary" id="childBack">← رجوع</button>
-    <div class="card">
-      <h1>📱 تليفون الابن</h1>
-      <p>أنشئ كودًا مؤقتًا وأدخله على تليفون الأب. لا تشارك الكود مع أي شخص غير موثوق.</p>
-      <div id="childUnpaired">
-        <button class="primary" id="makeCode">إنشاء كود الاقتران</button>
-        <div id="codeArea" class="hidden">
-          <p class="muted">الكود صالح لمدة 10 دقائق ولمرة واحدة:</p>
-          <div id="pairCode" class="code">------</div>
-          <p id="codeExpiry" class="muted"></p>
-          <button class="secondary" id="copyCode">نسخ الكود</button>
+<div class="studio">
+  <aside class="sidebar">
+    <div class="section-title"><i class="fa-solid fa-brain"></i> أدوات تحرير الفيديو</div>
+    <button class="ai-btn" data-effect="normal"><span>🎬 الصورة الأصلية</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="cinema"><span>🎞️ ألوان سينمائية</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="bright"><span>☀️ تحسين الإضاءة</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="bw"><span>⚫ أبيض وأسود</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="vivid"><span>🌈 ألوان زاهية</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="captions"><span>💬 إضافة كتابة</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="mute"><span>🔇 كتم الصوت</span><i class="fa-solid fa-chevron-left"></i></button>
+    <button class="ai-btn" data-effect="sound"><span>🔊 تشغيل الصوت</span><i class="fa-solid fa-chevron-left"></i></button>
+  </aside>
+
+  <main class="workspace">
+    <section class="player" id="playerArea">
+      <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="اختيار فيديو">
+        <i class="fa-solid fa-cloud-arrow-up"></i>
+        <h2>ارفع الفيديو لبدء التحرير</h2>
+        <p class="muted">اضغط لاختيار ملف أو اسحب الفيديو هنا</p>
+        <p class="muted">يدعم الملفات التي يستطيع المتصفح تشغيلها</p>
+        <button type="button" class="primary" id="chooseBtn">اختيار فيديو</button>
+      </div>
+      <video id="videoPlayer" controls playsinline preload="metadata"></video>
+      <div id="captionPreview"></div>
+      <div class="overlay" id="processingOverlay">
+        <div class="spinner"></div>
+        <h3 id="statusText">جارٍ تجهيز الفيديو...</h3>
+        <div class="progress-track"><div id="progressBar"></div></div>
+        <span id="progressText" class="muted">0%</span>
+      </div>
+    </section>
+
+    <input type="file" id="videoInput" accept="video/*" hidden>
+
+    <section class="panel">
+      <div class="row">
+        <div>
+          <h3 id="currentTask">جاهز لاستقبال الفيديو</h3>
+          <p class="muted" id="taskDesc">اختَر فيديو من جهازك للبدء.</p>
+        </div>
+        <button class="secondary" id="removeBtn" disabled>🗑️ إزالة الفيديو</button>
+      </div>
+
+      <div class="tools">
+        <div class="field">
+          <label for="captionText">الكتابة على الفيديو</label>
+          <input id="captionText" type="text" maxlength="150" placeholder="اكتب عنوان الفيديو">
+        </div>
+        <div class="field">
+          <label for="volumeRange">مستوى الصوت: <span id="volumeValue">100%</span></label>
+          <input id="volumeRange" type="range" min="0" max="100" value="100">
+        </div>
+        <div class="field">
+          <label for="brightnessRange">الإضاءة: <span id="brightnessValue">100%</span></label>
+          <input id="brightnessRange" type="range" min="50" max="150" value="100">
+        </div>
+        <div class="field">
+          <label for="contrastRange">التباين: <span id="contrastValue">100%</span></label>
+          <input id="contrastRange" type="range" min="50" max="160" value="100">
+        </div>
+        <div class="field">
+          <label for="startTime">بداية المقطع بالثواني</label>
+          <input id="startTime" type="number" min="0" step="0.1" value="0">
+        </div>
+        <div class="field">
+          <label for="endTime">نهاية المقطع بالثواني</label>
+          <input id="endTime" type="number" min="0" step="0.1" placeholder="نهاية الفيديو">
         </div>
       </div>
-      <div id="childPaired" class="hidden">
-        <div class="notice"><b class="ok">✓ الهاتف مرتبط بالأب</b><br>الاقتران محفوظ على السيرفر حتى يتم إلغاؤه.</div>
-      </div>
-    </div>
-    <div id="sharingCard" class="card hidden">
-      <h2>مشاركة بيانات الهاتف</h2>
-      <p>عند الضغط على الزر التالي، سيطلب المتصفح إذن الموقع. ستتم مشاركة الموقع والبطارية المتاحة فقط، ويمكنك إيقاف المشاركة في أي وقت.</p>
-      <button class="primary" id="startSharing">موافقة وبدء مشاركة البيانات</button>
-      <button class="danger hidden" id="stopSharing">إيقاف مشاركة البيانات</button>
-      <p id="shareState" class="muted">المشاركة متوقفة.</p>
-    </div>
-  </section>
 
-  <section id="parentScreen" class="hidden">
-    <button class="secondary" id="parentBack">← رجوع</button>
-    <div id="parentPairForm" class="card">
-      <h1>👨‍👧 تليفون الأب</h1>
-      <p>اكتب كود الاقتران الظاهر على تليفون الابن.</p>
-      <form id="pairForm">
-        <input id="codeInput" inputmode="numeric" autocomplete="one-time-code"
-          maxlength="6" pattern="[0-9]{6}" placeholder="الكود المكوّن من 6 أرقام" required>
-        <button class="primary" type="submit">ربط الهاتف</button>
-      </form>
-      <p class="muted">يجب أن يكون الكود جديدًا وغير منتهي الصلاحية.</p>
-    </div>
+      <div class="row">
+        <button class="secondary" id="resetBtn">↺ إعادة الإعدادات</button>
+        <button class="primary" id="exportBtn" disabled>⬇️ تصدير الفيديو</button>
+      </div>
 
-    <div id="parentDashboard" class="hidden">
-      <div class="card">
-        <h1>لوحة تحكم الأب</h1>
-        <div class="notice"><b class="ok">✓ تم الاقتران بنجاح</b><br>سيبقى الربط محفوظًا حتى تختار إلغاء الربط.</div>
+      <div class="status" aria-live="polite">
+        <strong>الحالة:</strong> <span id="message">اختَر فيديو من جهازك.</span>
       </div>
-      <div class="grid">
-        <div class="stat"><small>حالة مشاركة البيانات</small><strong id="shareValue">متوقفة</strong></div>
-        <div class="stat"><small>آخر اتصال</small><strong id="lastSeen">لا يوجد</strong></div>
-        <div class="stat"><small>البطارية</small><strong id="batteryValue">غير متاحة</strong></div>
-        <div class="stat"><small>الشحن</small><strong id="chargingValue">غير معروف</strong></div>
-      </div>
-      <div class="card">
-        <h2>📍 الموقع الذي شاركه الهاتف</h2>
-        <p id="locationValue">لم تتم مشاركة الموقع بعد.</p>
-        <a id="mapLink" class="hidden" target="_blank" rel="noopener noreferrer" style="color:#75bdff">فتح الموقع على الخريطة</a>
-        <p class="muted">الموقع لا يتحدث إلا عندما يكون هاتف الابن متصلًا ويوافق على المشاركة.</p>
-      </div>
-      <div class="card">
-        <h2>حدود التحكم</h2>
-        <p class="muted">هذه اللوحة لا تقرأ رسائل أو محادثات، ولا تفتح الكاميرا أو الميكروفون عن بُعد، ولا تقفل الهاتف أو تعيد تشغيله. هذه الوظائف ليست متاحة لموقع ويب عادي.</p>
-        <button class="secondary" id="refreshStatus">تحديث الحالة</button>
-        <button class="danger" id="unlink">إلغاء ربط الهاتف</button>
-      </div>
-    </div>
-  </section>
+      <p class="muted">التصدير يعتمد على دعم المتصفح. احتفظ بنسخة من الفيديو الأصلي.</p>
+    </section>
+  </main>
+</div>
 
-  <section id="errorScreen" class="hidden">
-    <div class="card">
-      <h2 class="bad">تعذر إكمال العملية</h2>
-      <p id="errorText"></p>
-      <button class="secondary" id="errorBack">العودة للبداية</button>
-    </div>
-  </section>
-</main>
-<footer>احرس عائلتك مع عبده · مشاركة البيانات بموافقة واضحة</footer>
-<div id="toast" role="status" aria-live="polite"></div>
+<footer>Abdo AI Video Studio Pro</footer>
 
 <script>
-"use strict";
+(() => {
+  "use strict";
 
-const $ = id => document.getElementById(id);
-const keys = {
-  child: "ehres_child_token_v1",
-  parent: "ehres_parent_token_v1"
-};
+  const $ = id => document.getElementById(id);
+  const video = $("videoPlayer");
+  const dropZone = $("dropZone");
+  const input = $("videoInput");
+  const overlay = $("processingOverlay");
+  const progressBar = $("progressBar");
+  const progressText = $("progressText");
+  const statusText = $("statusText");
+  const captionPreview = $("captionPreview");
+  const message = $("message");
+  const exportBtn = $("exportBtn");
+  const removeBtn = $("removeBtn");
 
-let currentRole = "";
-let geoWatch = null;
-let batteryManager = null;
-let pollTimer = null;
-let shareRequested = false;
+  let videoURL = null;
+  let selectedFile = null;
+  let currentEffect = "normal";
+  let exporting = false;
+  let exportTimer = null;
+  let exportFrame = null;
+  let exportRecorder = null;
+  let exportCanvas = null;
+  let exportStream = null;
+  let videoStream = null;
+  let stopRequested = false;
 
-function toast(message) {
-  const el = $("toast");
-  el.textContent = message;
-  el.style.display = "block";
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => el.style.display = "none", 3500);
-}
+  const effects = {
+    normal: "الصورة الأصلية",
+    cinema: "ألوان سينمائية",
+    bright: "تحسين الإضاءة",
+    bw: "أبيض وأسود",
+    vivid: "ألوان زاهية",
+    captions: "إضافة كتابة",
+    mute: "كتم الصوت",
+    sound: "تشغيل الصوت"
+  };
 
-function show(section) {
-  ["home", "childScreen", "parentScreen", "errorScreen"].forEach(id => {
-    $(id).classList.toggle("hidden", id !== section);
+  function setMessage(text) {
+    message.textContent = text;
+  }
+
+  function setTask(title, description) {
+    $("currentTask").textContent = title;
+    $("taskDesc").textContent = description;
+  }
+
+  function setBusy(busy) {
+    exporting = busy;
+    exportBtn.disabled = busy || !selectedFile;
+    removeBtn.disabled = busy || !selectedFile;
+    $("chooseBtn").disabled = busy;
+    document.querySelectorAll(".ai-btn,#resetBtn")
+      .forEach(button => button.disabled = busy);
+  }
+
+  function filterString() {
+    const brightness = Number($("brightnessRange").value);
+    const contrast = Number($("contrastRange").value);
+    let extra = "";
+
+    if (currentEffect === "cinema") extra = " saturate(115%) sepia(10%)";
+    if (currentEffect === "bw") extra = " grayscale(100%)";
+    if (currentEffect === "vivid") extra = " saturate(165%)";
+    if (currentEffect === "bright") extra = " saturate(110%)";
+
+    return `brightness(${brightness}%) contrast(${contrast}%)${extra}`;
+  }
+
+  function updatePreview() {
+    video.style.filter = filterString();
+    const caption = $("captionText").value.trim();
+    captionPreview.textContent = caption;
+    captionPreview.style.display = caption ? "block" : "none";
+    video.volume = Number($("volumeRange").value) / 100;
+    video.muted = currentEffect === "mute";
+
+    $("brightnessValue").textContent = $("brightnessRange").value + "%";
+    $("contrastValue").textContent = $("contrastRange").value + "%";
+    $("volumeValue").textContent = $("volumeRange").value + "%";
+  }
+
+  function showEffectButtons() {
+    document.querySelectorAll(".ai-btn").forEach(button => {
+      button.classList.toggle("active", button.dataset.effect === currentEffect);
+    });
+  }
+
+  function applyEffect(effect) {
+    if (!selectedFile) {
+      setMessage("ارفع فيديو أولًا قبل استخدام الأدوات.");
+      return;
+    }
+
+    currentEffect = effect;
+    updatePreview();
+    showEffectButtons();
+
+    const descriptions = {
+      normal: "تم اختيار الصورة الأصلية.",
+      cinema: "تم تطبيق فلتر الألوان السينمائية.",
+      bright: "تم اختيار نمط الإضاءة المحسنة.",
+      bw: "تم تطبيق تأثير الأبيض والأسود.",
+      vivid: "تم تطبيق نمط الألوان الزاهية.",
+      captions: "اكتب النص الذي تريد ظهوره على الفيديو.",
+      mute: "تم كتم صوت المعاينة.",
+      sound: "تم تفعيل صوت المعاينة."
+    };
+
+    setTask(effects[effect], descriptions[effect]);
+    setMessage(descriptions[effect]);
+
+    if (effect === "captions") $("captionText").focus();
+  }
+
+  function loadFile(file) {
+    if (exporting) return;
+
+    if (!file || !file.type.startsWith("video/")) {
+      setMessage("الملف غير صالح. اختَر ملف فيديو.");
+      return;
+    }
+
+    if (videoURL) URL.revokeObjectURL(videoURL);
+
+    selectedFile = file;
+    videoURL = URL.createObjectURL(file);
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+    video.style.display = "block";
+    dropZone.style.display = "none";
+    video.src = videoURL;
+
+    exportBtn.disabled = true;
+    removeBtn.disabled = false;
+    setTask("جارٍ تحميل الفيديو", file.name);
+    setMessage("جارٍ قراءة بيانات الفيديو...");
+  }
+
+  input.addEventListener("change", event => {
+    const file = event.target.files && event.target.files[0];
+    if (file) loadFile(file);
+    input.value = "";
   });
-}
 
-function showError(message) {
-  $("errorText").textContent = message;
-  show("errorScreen");
-}
+  $("chooseBtn").addEventListener("click", () => {
+    if (!exporting) input.click();
+  });
 
-function tokenFor(role) {
-  return localStorage.getItem(keys[role]) || "";
-}
+  dropZone.addEventListener("click", event => {
+    if (!event.target.closest("button") && !exporting) input.click();
+  });
 
-async function api(url, options = {}, role = "") {
-  const headers = { "Content-Type": "application/json", ...(options.headers || {}) };
-  const token = role ? tokenFor(role) : "";
-  if (token) headers.Authorization = "Bearer " + token;
+  dropZone.addEventListener("keydown", event => {
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      if (!exporting) input.click();
+    }
+  });
 
-  let response;
-  try {
-    response = await fetch(url, {
-      ...options,
-      headers,
-      cache: "no-store"
+  ["dragenter", "dragover"].forEach(name => {
+    $("playerArea").addEventListener(name, event => {
+      event.preventDefault();
+      dropZone.classList.add("dragging");
     });
-  } catch {
-    throw new Error("تعذر الاتصال بالسيرفر. تأكد من الإنترنت وأن السيرفر يعمل.");
-  }
+  });
 
-  let data;
-  try {
-    data = await response.json();
-  } catch {
-    throw new Error("السيرفر أرسل استجابة غير مفهومة.");
-  }
-
-  if (!response.ok || !data.ok) {
-    if (response.status === 401 && role) {
-      localStorage.removeItem(keys[role]);
-    }
-    throw new Error(data.error || "حدث خطأ غير متوقع.");
-  }
-
-  return data;
-}
-
-function stopPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = null;
-}
-
-function stopLocalSharing() {
-  shareRequested = false;
-  if (geoWatch !== null && navigator.geolocation) {
-    navigator.geolocation.clearWatch(geoWatch);
-  }
-  geoWatch = null;
-  batteryManager = null;
-  $("startSharing").classList.remove("hidden");
-  $("stopSharing").classList.add("hidden");
-  $("shareState").textContent = "المشاركة متوقفة.";
-}
-
-function resetView() {
-  stopPolling();
-  stopLocalSharing();
-  currentRole = "";
-  show("home");
-}
-
-$("chooseChild").addEventListener("click", async () => {
-  currentRole = "child";
-  show("childScreen");
-
-  if (!tokenFor("child")) {
-    try {
-      const data = await api("/api/child/create", {
-        method: "POST",
-        body: JSON.stringify({})
-      });
-      localStorage.setItem(keys.child, data.token);
-    } catch (e) {
-      showError(e.message);
-      return;
-    }
-  }
-
-  await loadChildState();
-});
-
-async function loadChildState() {
-  try {
-    const data = await api("/api/child/state", {}, "child");
-    const paired = Boolean(data.paired);
-
-    $("childUnpaired").classList.toggle("hidden", paired);
-    $("childPaired").classList.toggle("hidden", !paired);
-    $("sharingCard").classList.toggle("hidden", !paired);
-
-    if (paired) {
-      $("codeArea").classList.add("hidden");
-      $("shareState").textContent = data.sharing
-        ? "مشاركة البيانات مفعّلة."
-        : "المشاركة متوقفة.";
-      $("startSharing").classList.toggle("hidden", Boolean(data.sharing));
-      $("stopSharing").classList.toggle("hidden", !data.sharing);
-    }
-  } catch (e) {
-    showError(e.message);
-  }
-}
-
-$("makeCode").addEventListener("click", async () => {
-  $("makeCode").disabled = true;
-  try {
-    const data = await api("/api/child/code", {
-      method: "POST",
-      body: JSON.stringify({})
-    }, "child");
-
-    $("pairCode").textContent = data.code;
-    $("codeExpiry").textContent = "ينتهي الكود بعد 10 دقائق.";
-    $("codeArea").classList.remove("hidden");
-    toast("تم إنشاء كود الاقتران.");
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    $("makeCode").disabled = false;
-  }
-});
-
-$("copyCode").addEventListener("click", async () => {
-  const code = $("pairCode").textContent;
-  try {
-    await navigator.clipboard.writeText(code);
-    toast("تم نسخ الكود.");
-  } catch {
-    toast("انسخ الكود يدويًا.");
-  }
-});
-
-$("chooseParent").addEventListener("click", async () => {
-  currentRole = "parent";
-  show("parentScreen");
-
-  if (tokenFor("parent")) {
-    try {
-      await loadParentDashboard();
-      return;
-    } catch {
-      localStorage.removeItem(keys.parent);
-    }
-  }
-
-  $("parentPairForm").classList.remove("hidden");
-  $("parentDashboard").classList.add("hidden");
-});
-
-$("pairForm").addEventListener("submit", async event => {
-  event.preventDefault();
-  const code = $("codeInput").value.trim();
-
-  if (!/^[0-9]{6}$/.test(code)) {
-    toast("اكتب كودًا مكوّنًا من 6 أرقام.");
-    return;
-  }
-
-  const button = $("pairForm").querySelector("button");
-  button.disabled = true;
-
-  try {
-    const data = await api("/api/parent/pair", {
-      method: "POST",
-      body: JSON.stringify({ code })
+  ["dragleave", "drop"].forEach(name => {
+    $("playerArea").addEventListener(name, event => {
+      event.preventDefault();
+      dropZone.classList.remove("dragging");
     });
+  });
 
-    localStorage.setItem(keys.parent, data.token);
-    $("codeInput").value = "";
-    await loadParentDashboard();
-    toast("تم ربط الهاتف بنجاح.");
-  } catch (e) {
-    toast(e.message);
-  } finally {
-    button.disabled = false;
-  }
-});
+  $("playerArea").addEventListener("drop", event => {
+    if (exporting) return;
+    const file = event.dataTransfer.files && event.dataTransfer.files[0];
+    if (file) loadFile(file);
+  });
 
-async function loadParentDashboard() {
-  const data = await api("/api/parent/status", {}, "parent");
+  video.addEventListener("loadedmetadata", () => {
+    if (!selectedFile || !Number.isFinite(video.duration)) return;
 
-  $("parentPairForm").classList.add("hidden");
-  $("parentDashboard").classList.remove("hidden");
+    $("startTime").value = "0";
+    $("endTime").value = video.duration.toFixed(1);
+    exportBtn.disabled = false;
 
-  $("shareValue").textContent = data.device.sharing
-    ? "مفعّلة"
-    : "متوقفة";
+    setTask("الفيديو جاهز للتحرير", selectedFile.name);
+    setMessage(
+      `المدة ${video.duration.toFixed(1)} ثانية — ` +
+      `${video.videoWidth} × ${video.videoHeight}`
+    );
+    updatePreview();
+  });
 
-  $("lastSeen").textContent = data.device.lastSeen
-    ? new Date(data.device.lastSeen).toLocaleString("ar-EG")
-    : "لا يوجد اتصال";
+  video.addEventListener("error", () => {
+    if (selectedFile && !exporting) {
+      setMessage("تعذر تشغيل الفيديو. جرّب MP4 بترميز H.264.");
+    }
+  });
 
-  $("batteryValue").textContent =
-    Number.isFinite(data.device.battery)
-      ? data.device.battery + "%"
-      : "غير متاحة";
+  document.querySelectorAll(".ai-btn").forEach(button => {
+    button.addEventListener("click", () => applyEffect(button.dataset.effect));
+  });
 
-  $("chargingValue").textContent =
-    data.device.batteryCharging === true ? "يشحن" :
-    data.device.batteryCharging === false ? "لا يشحن" :
-    "غير معروف";
+  ["captionText","volumeRange","brightnessRange","contrastRange"]
+    .forEach(id => $(id).addEventListener("input", updatePreview));
 
-  const location = data.device.location;
-  if (location &&
-      Number.isFinite(location.latitude) &&
-      Number.isFinite(location.longitude)) {
-    $("locationValue").textContent =
-      location.latitude.toFixed(5) + ", " +
-      location.longitude.toFixed(5);
+  $("resetBtn").addEventListener("click", () => {
+    if (exporting) return;
 
-    $("mapLink").href =
-      "https://www.openstreetmap.org/?mlat=" +
-      encodeURIComponent(location.latitude) +
-      "&mlon=" + encodeURIComponent(location.longitude) +
-      "#map=16/" + encodeURIComponent(location.latitude) +
-      "/" + encodeURIComponent(location.longitude);
+    currentEffect = "normal";
+    $("captionText").value = "";
+    $("volumeRange").value = "100";
+    $("brightnessRange").value = "100";
+    $("contrastRange").value = "100";
 
-    $("mapLink").classList.remove("hidden");
-  } else {
-    $("locationValue").textContent = "لم تتم مشاركة الموقع بعد.";
-    $("mapLink").classList.add("hidden");
-    $("mapLink").removeAttribute("href");
-  }
-}
+    updatePreview();
+    showEffectButtons();
+    setTask("تمت إعادة الإعدادات", "يمكنك البدء من جديد.");
+    setMessage("تمت إعادة التأثيرات إلى الإعدادات الأصلية.");
+  });
 
-$("refreshStatus").addEventListener("click", async () => {
-  try {
-    await loadParentDashboard();
-    toast("تم تحديث الحالة.");
-  } catch (e) {
-    toast(e.message);
-  }
-});
+  function removeVideo() {
+    if (exporting) return;
 
-$("unlink").addEventListener("click", async () => {
-  if (!confirm("هل تريد إلغاء ربط هاتف الابن؟")) return;
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
 
-  try {
-    await api("/api/parent/unlink", {
-      method: "POST",
-      body: JSON.stringify({})
-    }, "parent");
+    if (videoURL) URL.revokeObjectURL(videoURL);
 
-    localStorage.removeItem(keys.parent);
-    stopPolling();
-    $("parentDashboard").classList.add("hidden");
-    $("parentPairForm").classList.remove("hidden");
-    toast("تم إلغاء الربط.");
-  } catch (e) {
-    toast(e.message);
-  }
-});
+    videoURL = null;
+    selectedFile = null;
+    video.style.display = "none";
+    dropZone.style.display = "flex";
+    captionPreview.style.display = "none";
+    exportBtn.disabled = true;
+    removeBtn.disabled = true;
 
-$("startSharing").addEventListener("click", async () => {
-  if (!navigator.geolocation) {
-    toast("المتصفح لا يدعم تحديد الموقع.");
-    return;
+    setTask("جاهز لاستقبال الفيديو", "اختَر فيديو للبدء.");
+    setMessage("تمت إزالة الفيديو.");
   }
 
-  if (!window.isSecureContext) {
-    toast("مشاركة الموقع تحتاج HTTPS أو localhost.");
-    return;
-  }
+  removeBtn.addEventListener("click", removeVideo);
 
-  shareRequested = true;
-  $("shareState").textContent = "جارٍ طلب إذن الموقع...";
-  $("startSharing").classList.add("hidden");
-  $("stopSharing").classList.remove("hidden");
+  function drawFrame(ctx, canvas) {
+    if (!video.videoWidth || !video.videoHeight) return;
 
-  try {
-    const data = await api("/api/child/share", {
-      method: "POST",
-      body: JSON.stringify({ sharing: true })
-    }, "child");
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    if (!data.ok) throw new Error("تعذر تشغيل المشاركة.");
+    ctx.save();
+    ctx.filter = filterString();
 
-    navigator.geolocation.getCurrentPosition(
-      position => sendLocation(position),
-      error => {
-        $("shareState").textContent =
-          error.code === 1
-            ? "لم تمنح إذن الموقع. يمكنك السماح من إعدادات المتصفح."
-            : "تعذر تحديد الموقع. تحقق من إعدادات الموقع.";
-        toast($("shareState").textContent);
-      },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+    const scale = Math.min(
+      canvas.width / video.videoWidth,
+      canvas.height / video.videoHeight
     );
 
-    geoWatch = navigator.geolocation.watchPosition(
-      position => sendLocation(position),
-      () => {},
-      { enableHighAccuracy: true, maximumAge: 15000, timeout: 20000 }
-    );
+    const width = video.videoWidth * scale;
+    const height = video.videoHeight * scale;
 
-    if (navigator.getBattery) {
-      try {
-        batteryManager = await navigator.getBattery();
-        await sendBattery();
-        batteryManager.addEventListener("levelchange", sendBattery);
-        batteryManager.addEventListener("chargingchange", sendBattery);
-      } catch {
-        batteryManager = null;
+    ctx.drawImage(
+      video,
+      (canvas.width - width) / 2,
+      (canvas.height - height) / 2,
+      width,
+      height
+    );
+    ctx.restore();
+
+    const caption = $("captionText").value.trim();
+    if (!caption) return;
+
+    ctx.save();
+    const fontSize = Math.max(18, Math.round(canvas.width * 0.035));
+    ctx.font = `bold ${fontSize}px Cairo, sans-serif`;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.direction = "rtl";
+    ctx.lineJoin = "round";
+    ctx.lineWidth = Math.max(3, fontSize * 0.12);
+    ctx.strokeStyle = "#000";
+    ctx.fillStyle = "#fff";
+
+    const maxWidth = canvas.width * 0.9;
+    const lines = [];
+    let line = "";
+
+    for (const word of caption.split(/\s+/)) {
+      const candidate = line ? line + " " + word : word;
+      if (ctx.measureText(candidate).width > maxWidth && line) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
       }
     }
+    if (line) lines.push(line);
 
-    $("shareState").textContent =
-      "المشاركة مفعّلة. يمكنك إيقافها في أي وقت.";
-  } catch (e) {
-    stopLocalSharing();
-    toast(e.message);
-  }
-});
+    const shownLines = lines.slice(-3);
+    const lineHeight = fontSize * 1.35;
+    const bottom = canvas.height * 0.08;
 
-async function sendLocation(position) {
-  if (!shareRequested) return;
-
-  const latitude = position.coords.latitude;
-  const longitude = position.coords.longitude;
-
-  try {
-    await api("/api/child/telemetry", {
-      method: "POST",
-      body: JSON.stringify({
-        location: { latitude, longitude }
-      })
-    }, "child");
-  } catch (e) {
-    $("shareState").textContent = e.message;
-  }
-}
-
-async function sendBattery() {
-  if (!shareRequested || !batteryManager) return;
-
-  try {
-    await api("/api/child/telemetry", {
-      method: "POST",
-      body: JSON.stringify({
-        battery: Math.round(batteryManager.level * 100),
-        batteryCharging: Boolean(batteryManager.charging)
-      })
-    }, "child");
-  } catch {}
-}
-
-$("stopSharing").addEventListener("click", async () => {
-  try {
-    await api("/api/child/share", {
-      method: "POST",
-      body: JSON.stringify({ sharing: false })
-    }, "child");
-  } catch (e) {
-    toast(e.message);
+    shownLines.forEach((text, index) => {
+      const y = canvas.height - bottom -
+        (shownLines.length - 1 - index) * lineHeight;
+      ctx.strokeText(text, canvas.width / 2, y, maxWidth);
+      ctx.fillText(text, canvas.width / 2, y, maxWidth);
+    });
+    ctx.restore();
   }
 
-  stopLocalSharing();
-  toast("تم إيقاف مشاركة البيانات.");
-});
-
-$("childBack").addEventListener("click", resetView);
-$("parentBack").addEventListener("click", resetView);
-$("errorBack").addEventListener("click", resetView);
-
-async function boot() {
-  // Restore the child's session if this is the device that was paired as child.
-  if (tokenFor("child")) {
-    currentRole = "child";
-    show("childScreen");
-    await loadChildState();
-    return;
+  function chooseRecorderType() {
+    if (!window.MediaRecorder) return "";
+    const types = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ];
+    return types.find(type => MediaRecorder.isTypeSupported(type)) || "";
   }
 
-  // Restore the parent's session without asking for the pairing code again.
-  if (tokenFor("parent")) {
-    currentRole = "parent";
-    show("parentScreen");
-    try {
-      await loadParentDashboard();
-      stopPolling();
-      pollTimer = setInterval(async () => {
-        if (currentRole !== "parent") return;
-        try {
-          await loadParentDashboard();
-        } catch {
-          stopPolling();
-        }
+  function waitForSeek(time) {
+    return new Promise((resolve, reject) => {
+      if (Math.abs(video.currentTime - time) < 0.05) {
+        resolve();
+        return;
+      }
+
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new Error("انتهت مهلة الانتقال إلى موضع الفيديو."));
       }, 10000);
+
+      function cleanup() {
+        clearTimeout(timeout);
+        video.removeEventListener("seeked", done);
+        video.removeEventListener("error", failed);
+      }
+
+      function done() {
+        cleanup();
+        resolve();
+      }
+
+      function failed() {
+        cleanup();
+        reject(new Error("تعذر الانتقال إلى الموضع المطلوب."));
+      }
+
+      video.addEventListener("seeked", done, { once: true });
+      video.addEventListener("error", failed, { once: true });
+
+      try {
+        video.currentTime = time;
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
+  function stopExportResources() {
+    if (exportFrame !== null) {
+      cancelAnimationFrame(exportFrame);
+      exportFrame = null;
+    }
+
+    if (exportTimer !== null) {
+      clearInterval(exportTimer);
+      exportTimer = null;
+    }
+
+    if (videoStream) {
+      videoStream.getTracks().forEach(track => track.stop());
+      videoStream = null;
+    }
+
+    if (exportStream) {
+      exportStream.getTracks().forEach(track => track.stop());
+      exportStream = null;
+    }
+
+    exportCanvas = null;
+  }
+
+  function downloadBlob(blob) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "abdo-ai-edited-video.webm";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setMessage("تم تصدير وتحميل الفيديو بنجاح!");
+  }
+
+  async function startExport() {
+    if (!selectedFile || exporting) return;
+
+    const startTime = Math.max(0, parseFloat($("startTime").value) || 0);
+    const durationLimit = parseFloat($("endTime").value);
+    const endTime = (!isNaN(durationLimit) && durationLimit > startTime) 
+      ? Math.min(video.duration, durationLimit) 
+      : video.duration;
+
+    if (startTime >= endTime) {
+      alert("وقت البداية يجب أن يكون أقل من وقت النهاية!");
       return;
-    } catch {
-      localStorage.removeItem(keys.parent);
+    }
+
+    const mimeType = chooseRecorderType();
+    if (!mimeType) {
+      alert("متصفحك لا يدعم تصدير الفيديو بهذه الطريقة. حاول استخدام متصفح حديث مثل Google Chrome.");
+      return;
+    }
+
+    setBusy(true);
+    overlay.style.display = "flex";
+    progressBar.style.width = "0%";
+    progressText.textContent = "0%";
+    statusText.textContent = "جارٍ إعداد محرك التصدير...";
+    setMessage("جارٍ معالجة وتصدير الفيديو...");
+
+    stopRequested = false;
+    exportCanvas = document.createElement("canvas");
+    exportCanvas.width = video.videoWidth || 1280;
+    exportCanvas.height = video.videoHeight || 720;
+    const ctx = exportCanvas.getContext("2d");
+
+    try {
+      exportStream = exportCanvas.captureStream(30);
+      
+      if (currentEffect !== "mute" && typeof video.captureStream === "function") {
+        try {
+          videoStream = video.captureStream();
+          const audioTracks = videoStream.getAudioTracks();
+          if (audioTracks.length > 0) {
+            audioTracks.forEach(track => exportStream.addTrack(track));
+          }
+        } catch (e) {
+          console.log("Audio capture skipped:", e);
+        }
+      }
+
+      exportRecorder = new MediaRecorder(exportStream, { mimeType });
+      const chunks = [];
+
+      exportRecorder.ondataavailable = e => {
+        if (e.data && e.data.size > 0) chunks.push(e.data);
+      };
+
+      exportRecorder.onstop = () => {
+        stopExportResources();
+        setBusy(false);
+        overlay.style.display = "none";
+        if (!stopRequested && chunks.length > 0) {
+          const blob = new Blob(chunks, { type: mimeType });
+          downloadBlob(blob);
+        } else {
+          setMessage("تم إلغاء التصدير.");
+        }
+      };
+
+      video.pause();
+      await waitForSeek(startTime);
+
+      exportRecorder.start();
+      video.playbackRate = 1.0;
+      await video.play();
+
+      const totalDuration = endTime - startTime;
+
+      exportTimer = setInterval(() => {
+        const currentProgressTime = video.currentTime - startTime;
+        const progress = Math.min(100, Math.max(0, (currentProgressTime / totalDuration) * 100));
+        
+        progressBar.style.width = progress.toFixed(1) + "%";
+        progressText.textContent = progress.toFixed(0) + "%";
+        statusText.textContent = `جارٍ تصدير الفيديو (${progress.toFixed(0)}%)...`;
+
+        drawFrame(ctx, exportCanvas);
+
+        if (video.currentTime >= endTime || video.ended) {
+          clearInterval(exportTimer);
+          exportTimer = null;
+          video.pause();
+          if (exportRecorder && exportRecorder.state === "recording") {
+            exportRecorder.stop();
+          }
+        }
+      }, 50);
+
+    } catch (err) {
+      console.error(err);
+      stopExportResources();
+      setBusy(false);
+      overlay.style.display = "none";
+      alert("حدث خطأ أثناء تصدير الفيديو: " + err.message);
+      setMessage("فشل التصدير.");
     }
   }
 
-  show("home");
-}
-
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && currentRole === "parent") {
-    loadParentDashboard().catch(() => {});
-  }
-});
-
-boot();
+  exportBtn.addEventListener("click", startExport);
+})();
 </script>
 </body>
-</html>`;
-
-async function route(req, res) {
-  const url = new URL(req.url, "http://localhost");
-  const pathname = url.pathname;
-
-  if (req.method === "GET" && pathname === "/") {
-    return html(res, PAGE);
-  }
-
-  if (req.method === "GET" && pathname === "/health") {
-    return json(res, 200, { ok: true, service: "ehres-aelatak-abdo" });
-  }
-
-  if (req.method === "POST" && pathname === "/api/child/create") {
-    const deviceId = makeId(12);
-    const token = issueSession("child", { deviceId });
-
-    db.devices[deviceId] = {
-      label: "هاتف الابن",
-      createdAt: Date.now(),
-      lastSeen: Date.now(),
-      sharing: false,
-      telemetry: {}
-    };
-
-    saveState();
-    return json(res, 201, { ok: true, token });
-  }
-
-  if (req.method === "POST" && pathname === "/api/child/code") {
-    const session = getSession(req, "child");
-    if (!session) return fail(res, 401, "جلسة الابن غير صالحة. أعد فتح التطبيق.");
-
-    if (findPairForChild(session.deviceId)) {
-      return fail(res, 409, "هذا الهاتف مرتبط بالفعل. ألغِ الربط أولًا إذا أردت ربطه بجهاز آخر.");
-    }
-
-    const device = db.devices[session.deviceId];
-    if (!device) return fail(res, 404, "لم يتم العثور على الهاتف.");
-
-    const created = createPairingCode(session.deviceId);
-    return json(res, 200, {
-      ok: true,
-      code: created.code,
-      expiresAt: created.expiresAt
-    });
-  }
-
-  if (req.method === "GET" && pathname === "/api/child/state") {
-    const session = getSession(req, "child");
-    if (!session) return fail(res, 401, "جلسة الابن غير صالحة.");
-
-    const pair = findPairForChild(session.deviceId);
-    const device = db.devices[session.deviceId];
-
-    return json(res, 200, {
-      ok: true,
-      paired: Boolean(pair),
-      sharing: Boolean(device && device.sharing)
-    });
-  }
-
-  if (req.method === "POST" && pathname === "/api/parent/pair") {
-    const ip = req.socket.remoteAddress || "unknown";
-    if (!allowedAttempt(ip)) {
-      return fail(res, 429, "محاولات كثيرة. انتظر 10 دقائق ثم حاول مرة أخرى.");
-    }
-
-    const body = await readBody(req);
-    const code = String(body.code || "").trim();
-
-    if (!/^[0-9]{6}$/.test(code)) {
-      return fail(res, 400, "اكتب كودًا صحيحًا مكوّنًا من 6 أرقام.");
-    }
-
-    cleanExpiredCodes();
-
-    const record = db.codes[code];
-    if (!record || record.expiresAt <= Date.now()) {
-      return fail(res, 400, "الكود غير صحيح أو انتهت صلاحيته. أنشئ كودًا جديدًا من هاتف الابن.");
-    }
-
-    const device = db.devices[record.childDeviceId];
-    if (!device) {
-      delete db.codes[code];
-      saveState();
-      return fail(res, 400, "الهاتف غير موجود. أنشئ كودًا جديدًا.");
-    }
-
-    if (findPairForChild(record.childDeviceId)) {
-      delete db.codes[code];
-      saveState();
-      return fail(res, 409, "هذا الهاتف مرتبط بالفعل.");
-    }
-
-    delete db.codes[code];
-
-    const pairId = makeId(12);
-    const parentDeviceId = makeId(12);
-    const parentToken = issueSession("parent", {
-      pairId,
-      deviceId: parentDeviceId
-    });
-
-    db.pairs[pairId] = {
-      childDeviceId: record.childDeviceId,
-      parentDeviceId,
-      createdAt: Date.now()
-    };
-
-    device.lastSeen = Date.now();
-    saveState();
-
-    return json(res, 200, {
-      ok: true,
-      token: parentToken,
-      message: "تم الاقتران بنجاح."
-    });
-  }
-
-  if (req.method === "GET" && pathname === "/api/parent/status") {
-    const session = getSession(req, "parent");
-    if (!session) return fail(res, 401, "جلسة الأب غير صالحة. أعد الاقتران.");
-
-    const pair = findPairForParent(session);
-    if (!pair) {
-      delete db.sessions[session.tokenHash];
-      saveState();
-      return fail(res, 401, "لم يعد هناك هاتف مرتبط بهذه الجلسة.");
-    }
-
-    const device = getChildDevice(pair);
-    if (!device) return fail(res, 404, "لم يتم العثور على هاتف الابن.");
-
-    return json(res, 200, {
-      ok: true,
-      device: deviceSummary(device)
-    });
-  }
-
-  if (req.method === "POST" && pathname === "/api/parent/unlink") {
-    const session = getSession(req, "parent");
-    if (!session) return fail(res, 401, "جلسة الأب غير صالحة.");
-
-    const pair = findPairForParent(session);
-    if (!pair) return fail(res, 404, "لا يوجد جهاز مرتبط.");
-
-    const child = getChildDevice(pair);
-    if (child) {
-      child.sharing = false;
-      child.telemetry = {};
-    }
-
-    delete db.pairs[session.pairId];
-    delete db.sessions[session.tokenHash];
-
-    // Invalidate pairing codes for this child.
-    for (const [code, item] of Object.entries(db.codes)) {
-      if (item.childDeviceId === pair.childDeviceId) delete db.codes[code];
-    }
-
-    saveState();
-    return json(res, 200, { ok: true, message: "تم إلغاء الربط." });
-  }
-
-  if (req.method === "POST" && pathname === "/api/child/share") {
-    const session = getSession(req, "child");
-    if (!session) return fail(res, 401, "جلسة الابن غير صالحة.");
-
-    const body = await readBody(req);
-    if (typeof body.sharing !== "boolean") {
-      return fail(res, 400, "قيمة المشاركة غير صحيحة.");
-    }
-
-    const device = db.devices[session.deviceId];
-    if (!device) return fail(res, 404, "لم يتم العثور على الهاتف.");
-
-    if (!findPairForChild(session.deviceId)) {
-      return fail(res, 409, "اربط الهاتف بالأب أولًا.");
-    }
-
-    device.sharing = body.sharing;
-    device.lastSeen = Date.now();
-
-    if (!body.sharing) device.telemetry = {};
-
-    saveState();
-    return json(res, 200, { ok: true });
-  }
-
-  if (req.method === "POST" && pathname === "/api/child/telemetry") {
-    const session = getSession(req, "child");
-    if (!session) return fail(res, 401, "جلسة الابن غير صالحة.");
-
-    const device = db.devices[session.deviceId];
-    if (!device) return fail(res, 404, "لم يتم العثور على الهاتف.");
-
-    if (!device.sharing || !findPairForChild(session.deviceId)) {
-      return fail(res, 403, "مشاركة البيانات متوقفة.");
-    }
-
-    const body = await readBody(req);
-    device.telemetry = device.telemetry || {};
-
-    if (body.location !== undefined) {
-      const location = body.location;
-
-      if (!location ||
-          !Number.isFinite(location.latitude) ||
-          !Number.isFinite(location.longitude) ||
-          Math.abs(location.latitude) > 90 ||
-          Math.abs(location.longitude) > 180) {
-        return fail(res, 400, "بيانات الموقع غير صحيحة.");
-      }
-
-      device.telemetry.location = {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        updatedAt: Date.now()
-      };
-    }
-
-    if (body.battery !== undefined) {
-      if (!Number.isFinite(body.battery) ||
-          body.battery < 0 ||
-          body.battery > 100) {
-        return fail(res, 400, "بيانات البطارية غير صحيحة.");
-      }
-
-      device.telemetry.battery = Math.round(body.battery);
-    }
-
-    if (body.batteryCharging !== undefined) {
-      if (typeof body.batteryCharging !== "boolean") {
-        return fail(res, 400, "حالة الشحن غير صحيحة.");
-      }
-
-      device.telemetry.batteryCharging = body.batteryCharging;
-    }
-
-    device.lastSeen = Date.now();
-    saveState();
-    return json(res, 200, { ok: true });
-  }
-
-  return fail(res, 404, "المسار غير موجود.");
-}
-
-const server = http.createServer(async (req, res) => {
-  try {
-    await route(req, res);
-  } catch (error) {
-    if (error.message === "BODY_TOO_LARGE") {
-      return fail(res, 413, "حجم الطلب أكبر من المسموح.");
-    }
-
-    if (error.message === "INVALID_JSON") {
-      return fail(res, 400, "بيانات JSON غير صحيحة.");
-    }
-
-    console.error("Request error:", error.message);
-    if (!res.headersSent) {
-      return fail(res, 500, "حدث خطأ داخلي. راجع سجل السيرفر.");
-    }
-    res.end();
-  }
-});
-
-server.listen(PORT, HOST, () => {
-  console.log("احرس عائلتك مع عبده يعمل على المنفذ " + PORT);
-  console.log("افتح: http://localhost:" + PORT);
-});
+</html>
