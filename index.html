@@ -1,665 +1,428 @@
-<!DOCTYPE html>
-<html lang="ar" dir="rtl">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#090d16">
-<title>عبده AI Video Studio Pro</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 
-<style>
-:root{--bg:#090d16;--card:#111827;--border:#263247;--cyan:#06b6d4;--purple:#7c3aed;--pink:#ec4899;--text:#f9fafb;--muted:#9ca3af}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:Cairo,sans-serif}
-button,input{font:inherit}
-button{cursor:pointer}
-header{position:sticky;top:0;z-index:10;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 18px;background:#111827f5;border-bottom:1px solid var(--border)}
-.logo{font-size:clamp(15px,3vw,22px);font-weight:900;color:#67e8f9}
-.badge{background:linear-gradient(120deg,var(--purple),var(--pink));border-radius:30px;padding:5px 10px;font-size:11px}
-.studio{display:grid;grid-template-columns:280px minmax(0,1fr);gap:16px;padding:16px;max-width:1450px;margin:auto}
-.sidebar,.panel{background:var(--card);border:1px solid var(--border);border-radius:15px;padding:16px}
-.sidebar{display:flex;flex-direction:column;gap:10px}
-.section-title{font-weight:800;color:#cbd5e1;margin-bottom:6px}
-.ai-btn{width:100%;display:flex;align-items:center;justify-content:space-between;gap:8px;text-align:right;color:white;background:#ffffff06;border:1px solid var(--border);border-radius:10px;padding:12px}
-.ai-btn:hover,.ai-btn.active{border-color:var(--cyan);background:#06b6d41a}
-.ai-btn i{color:#67e8f9}
-.workspace{display:flex;flex-direction:column;gap:15px;min-width:0}
-.player{position:relative;background:#000;border:1px solid var(--border);border-radius:14px;overflow:hidden;min-height:250px;height:min(55vw,480px);display:flex;align-items:center;justify-content:center}
-.drop-zone{width:90%;min-height:190px;padding:20px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;text-align:center;border:2px dashed var(--purple);border-radius:14px;background:#7c3aed0b;cursor:pointer}
-.drop-zone.dragging{border-color:var(--cyan);background:#06b6d422}
-.drop-zone i{font-size:45px;color:var(--cyan)}
-.drop-zone h2{font-size:19px;margin:0}
-.muted{color:var(--muted);font-size:13px}
-#videoPlayer{display:none;width:100%;height:100%;max-height:100%;object-fit:contain;background:#000}
-#captionPreview{display:none;position:absolute;bottom:55px;left:5%;right:5%;text-align:center;font-size:clamp(16px,3vw,28px);font-weight:900;color:white;text-shadow:2px 2px 4px #000,-2px -2px 4px #000;pointer-events:none;white-space:pre-wrap}
-.overlay{display:none;position:absolute;inset:0;z-index:5;background:#090d16ed;align-items:center;justify-content:center;flex-direction:column;gap:15px;text-align:center;padding:20px}
-.spinner{width:45px;height:45px;border:4px solid #ffffff25;border-top-color:var(--cyan);border-radius:50%;animation:spin .8s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.progress-track{width:min(400px,90%);height:9px;border-radius:20px;background:#263247;overflow:hidden}
-#progressBar{width:0;height:100%;background:linear-gradient(90deg,var(--cyan),var(--purple));transition:width .15s}
-.panel{display:flex;flex-direction:column;gap:15px}
-.row{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
-h3{margin:0;font-size:16px}
-.primary,.secondary{border-radius:9px;padding:10px 15px;font-weight:800}
-.primary{border:0;color:white;background:linear-gradient(120deg,var(--purple),var(--pink))}
-.secondary{background:#ffffff08;border:1px solid var(--border);color:white}
-button:disabled{opacity:.45;cursor:not-allowed}
-.tools{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.field{display:flex;flex-direction:column;gap:6px}
-.field label{font-size:13px;color:#cbd5e1}
-.field input[type=text],.field input[type=number]{width:100%;padding:10px;border-radius:8px;color:white;background:#090d16;border:1px solid var(--border)}
-.field input[type=range]{width:100%;accent-color:var(--cyan)}
-.status{background:#090d16;border:1px solid var(--border);padding:12px;border-radius:10px;font-size:13px;overflow-wrap:anywhere}
-#message{color:#a5f3fc}
-footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
-@media(max-width:800px){.studio{grid-template-columns:1fr;padding:10px}.player{height:56vw;min-height:230px;max-height:400px}.tools{grid-template-columns:1fr}header{padding:12px}}
-</style>
-</head>
+import os
+import uuid
+import shutil
+import logging
+import tempfile
+from pathlib import Path
 
-<body>
-<header>
-  <div class="logo"><i class="fa-solid fa-wand-magic-sparkles"></i> عبده AI Video Studio</div>
-  <div class="badge"><i class="fa-solid fa-film"></i> محرر الفيديو</div>
-</header>
+import whisper
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
+from moviepy import VideoFileClip, TextClip, CompositeVideoClip
 
-<div class="studio">
-  <aside class="sidebar">
-    <div class="section-title"><i class="fa-solid fa-brain"></i> أدوات تحرير الفيديو</div>
-    <button class="ai-btn" data-effect="normal"><span>🎬 الصورة الأصلية</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="cinema"><span>🎞️ ألوان سينمائية</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="bright"><span>☀️ تحسين الإضاءة</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="bw"><span>⚫ أبيض وأسود</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="vivid"><span>🌈 ألوان زاهية</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="captions"><span>💬 إضافة كتابة</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="mute"><span>🔇 كتم الصوت</span><i class="fa-solid fa-chevron-left"></i></button>
-    <button class="ai-btn" data-effect="sound"><span>🔊 تشغيل الصوت</span><i class="fa-solid fa-chevron-left"></i></button>
-  </aside>
+# =====================================================
+# Abdo AI Video Engine Pro - Version 4.1
+# Fixed Auto-Zoom + Arabic Captions + MP4 Export
+# =====================================================
 
-  <main class="workspace">
-    <section class="player" id="playerArea">
-      <div class="drop-zone" id="dropZone" tabindex="0" role="button" aria-label="اختيار فيديو">
-        <i class="fa-solid fa-cloud-arrow-up"></i>
-        <h2>ارفع الفيديو لبدء التحرير</h2>
-        <p class="muted">اضغط لاختيار ملف أو اسحب الفيديو هنا</p>
-        <p class="muted">يدعم الملفات التي يستطيع المتصفح تشغيلها</p>
-        <button type="button" class="primary" id="chooseBtn">اختيار فيديو</button>
-      </div>
-      <video id="videoPlayer" controls playsinline preload="metadata"></video>
-      <div id="captionPreview"></div>
-      <div class="overlay" id="processingOverlay">
-        <div class="spinner"></div>
-        <h3 id="statusText">جارٍ تجهيز الفيديو...</h3>
-        <div class="progress-track"><div id="progressBar"></div></div>
-        <span id="progressText" class="muted">0%</span>
-      </div>
-    </section>
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("abdo-ai-video")
 
-    <input type="file" id="videoInput" accept="video/*" hidden>
+APP_NAME = "Abdo AI Video Engine Pro"
+APP_VERSION = "4.1"
 
-    <section class="panel">
-      <div class="row">
-        <div>
-          <h3 id="currentTask">جاهز لاستقبال الفيديو</h3>
-          <p class="muted" id="taskDesc">اختَر فيديو من جهازك للبدء.</p>
-        </div>
-        <button class="secondary" id="removeBtn" disabled>🗑️ إزالة الفيديو</button>
-      </div>
+MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "300"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
-      <div class="tools">
-        <div class="field">
-          <label for="captionText">الكتابة على الفيديو</label>
-          <input id="captionText" type="text" maxlength="150" placeholder="اكتب عنوان الفيديو">
-        </div>
-        <div class="field">
-          <label for="volumeRange">مستوى الصوت: <span id="volumeValue">100%</span></label>
-          <input id="volumeRange" type="range" min="0" max="100" value="100">
-        </div>
-        <div class="field">
-          <label for="brightnessRange">الإضاءة: <span id="brightnessValue">100%</span></label>
-          <input id="brightnessRange" type="range" min="50" max="150" value="100">
-        </div>
-        <div class="field">
-          <label for="contrastRange">التباين: <span id="contrastValue">100%</span></label>
-          <input id="contrastRange" type="range" min="50" max="160" value="100">
-        </div>
-        <div class="field">
-          <label for="startTime">بداية المقطع بالثواني</label>
-          <input id="startTime" type="number" min="0" step="0.1" value="0">
-        </div>
-        <div class="field">
-          <label for="endTime">نهاية المقطع بالثواني</label>
-          <input id="endTime" type="number" min="0" step="0.1" placeholder="نهاية الفيديو">
-        </div>
-      </div>
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "24"))
+ZOOM_FACTOR = float(os.getenv("ZOOM_FACTOR", "1.15"))
 
-      <div class="row">
-        <button class="secondary" id="resetBtn">↺ إعادة الإعدادات</button>
-        <button class="primary" id="exportBtn" disabled>⬇️ تصدير الفيديو</button>
-      </div>
+ARABIC_FONT_PATH = os.getenv("ARABIC_FONT_PATH", "")
+TEMP_ROOT = os.getenv("VIDEO_TEMP_DIR", tempfile.gettempdir())
 
-      <div class="status" aria-live="polite">
-        <strong>الحالة:</strong> <span id="message">اختَر فيديو من جهازك.</span>
-      </div>
-      <p class="muted">التصدير يعتمد على دعم المتصفح. احتفظ بنسخة من الفيديو الأصلي.</p>
-    </section>
-  </main>
-</div>
+ALLOWED_EXTENSIONS = {
+    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"
+}
 
-<footer>Abdo AI Video Studio Pro</footer>
+app = FastAPI(
+    title=APP_NAME,
+    version=APP_VERSION,
+    description="AI transcription, Arabic captions, auto-zoom and MP4 export"
+)
 
-<script>
-(() => {
-  "use strict";
+model = None
 
-  const $ = id => document.getElementById(id);
-  const video = $("videoPlayer");
-  const dropZone = $("dropZone");
-  const input = $("videoInput");
-  const overlay = $("processingOverlay");
-  const progressBar = $("progressBar");
-  const progressText = $("progressText");
-  const statusText = $("statusText");
-  const captionPreview = $("captionPreview");
-  const message = $("message");
-  const exportBtn = $("exportBtn");
-  const removeBtn = $("removeBtn");
 
-  let videoURL = null;
-  let selectedFile = null;
-  let currentEffect = "normal";
-  let exporting = false;
-  let exportTimer = null;
-  let exportFrame = null;
-  let exportRecorder = null;
-  let exportCanvas = null;
-  let exportStream = null;
-  let videoStream = null;
-  let stopRequested = false;
+@app.on_event("startup")
+def load_whisper_model():
+    global model
 
-  const effects = {
-    normal: "الصورة الأصلية",
-    cinema: "ألوان سينمائية",
-    bright: "تحسين الإضاءة",
-    bw: "أبيض وأسود",
-    vivid: "ألوان زاهية",
-    captions: "إضافة كتابة",
-    mute: "كتم الصوت",
-    sound: "تشغيل الصوت"
-  };
+    logger.info("Loading Whisper model: %s", WHISPER_MODEL)
 
-  function setMessage(text) {
-    message.textContent = text;
-  }
+    try:
+        model = whisper.load_model(WHISPER_MODEL)
+        logger.info("Whisper model loaded successfully")
+    except Exception:
+        logger.exception("Whisper model could not be loaded")
+        raise
 
-  function setTask(title, description) {
-    $("currentTask").textContent = title;
-    $("taskDesc").textContent = description;
-  }
 
-  function setBusy(busy) {
-    exporting = busy;
-    exportBtn.disabled = busy || !selectedFile;
-    removeBtn.disabled = busy || !selectedFile;
-    $("chooseBtn").disabled = busy;
-    document.querySelectorAll(".ai-btn,#resetBtn")
-      .forEach(button => button.disabled = busy);
-  }
-
-  function filterString() {
-    const brightness = Number($("brightnessRange").value);
-    const contrast = Number($("contrastRange").value);
-    let extra = "";
-
-    if (currentEffect === "cinema") extra = " saturate(115%) sepia(10%)";
-    if (currentEffect === "bw") extra = " grayscale(100%)";
-    if (currentEffect === "vivid") extra = " saturate(165%)";
-    if (currentEffect === "bright") extra = " saturate(110%)";
-
-    return `brightness(${brightness}%) contrast(${contrast}%)${extra}`;
-  }
-
-  function updatePreview() {
-    video.style.filter = filterString();
-    const caption = $("captionText").value.trim();
-    captionPreview.textContent = caption;
-    captionPreview.style.display = caption ? "block" : "none";
-    video.volume = Number($("volumeRange").value) / 100;
-    video.muted = currentEffect === "mute";
-
-    $("brightnessValue").textContent = $("brightnessRange").value + "%";
-    $("contrastValue").textContent = $("contrastRange").value + "%";
-    $("volumeValue").textContent = $("volumeRange").value + "%";
-  }
-
-  function showEffectButtons() {
-    document.querySelectorAll(".ai-btn").forEach(button => {
-      button.classList.toggle("active", button.dataset.effect === currentEffect);
-    });
-  }
-
-  function applyEffect(effect) {
-    if (!selectedFile) {
-      setMessage("ارفع فيديو أولًا قبل استخدام الأدوات.");
-      return;
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "service": APP_NAME,
+        "version": APP_VERSION,
+        "creator": "Abdo",
+        "features": [
+            "speech_transcription",
+            "timed_captions",
+            "arabic_caption_support",
+            "center_crop_auto_zoom",
+            "mp4_export"
+        ]
     }
 
-    currentEffect = effect;
-    updatePreview();
-    showEffectButtons();
 
-    const descriptions = {
-      normal: "تم اختيار الصورة الأصلية.",
-      cinema: "تم تطبيق فلتر الألوان السينمائية.",
-      bright: "تم اختيار نمط الإضاءة المحسنة.",
-      bw: "تم تطبيق تأثير الأبيض والأسود.",
-      vivid: "تم تطبيق نمط الألوان الزاهية.",
-      captions: "اكتب النص الذي تريد ظهوره على الفيديو.",
-      mute: "تم كتم صوت المعاينة.",
-      sound: "تم تفعيل صوت المعاينة."
-    };
-
-    setTask(effects[effect], descriptions[effect]);
-    setMessage(descriptions[effect]);
-
-    if (effect === "captions") $("captionText").focus();
-  }
-
-  function loadFile(file) {
-    if (exporting) return;
-
-    if (!file || !file.type.startsWith("video/")) {
-      setMessage("الملف غير صالح. اختَر ملف فيديو.");
-      return;
+@app.get("/health")
+def health():
+    return {
+        "status": "ready" if model is not None else "loading",
+        "model": WHISPER_MODEL,
+        "version": APP_VERSION
     }
 
-    if (videoURL) URL.revokeObjectURL(videoURL);
-
-    selectedFile = file;
-    videoURL = URL.createObjectURL(file);
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-    video.style.display = "block";
-    dropZone.style.display = "none";
-    video.src = videoURL;
-
-    exportBtn.disabled = true;
-    removeBtn.disabled = false;
-    setTask("جارٍ تحميل الفيديو", file.name);
-    setMessage("جارٍ قراءة بيانات الفيديو...");
-  }
-
-  input.addEventListener("change", event => {
-    const file = event.target.files && event.target.files[0];
-    if (file) loadFile(file);
-    input.value = "";
-  });
-
-  $("chooseBtn").addEventListener("click", () => {
-    if (!exporting) input.click();
-  });
-
-  dropZone.addEventListener("click", event => {
-    if (!event.target.closest("button") && !exporting) input.click();
-  });
-
-  dropZone.addEventListener("keydown", event => {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      if (!exporting) input.click();
-    }
-  });
-
-  ["dragenter", "dragover"].forEach(name => {
-    $("playerArea").addEventListener(name, event => {
-      event.preventDefault();
-      dropZone.classList.add("dragging");
-    });
-  });
-
-  ["dragleave", "drop"].forEach(name => {
-    $("playerArea").addEventListener(name, event => {
-      event.preventDefault();
-      dropZone.classList.remove("dragging");
-    });
-  });
-
-  $("playerArea").addEventListener("drop", event => {
-    if (exporting) return;
-    const file = event.dataTransfer.files && event.dataTransfer.files[0];
-    if (file) loadFile(file);
-  });
-
-  video.addEventListener("loadedmetadata", () => {
-    if (!selectedFile || !Number.isFinite(video.duration)) return;
-
-    $("startTime").value = "0";
-    $("endTime").value = video.duration.toFixed(1);
-    exportBtn.disabled = false;
-
-    setTask("الفيديو جاهز للتحرير", selectedFile.name);
-    setMessage(
-      `المدة ${video.duration.toFixed(1)} ثانية — ` +
-      `${video.videoWidth} × ${video.videoHeight}`
-    );
-    updatePreview();
-  });
-
-  video.addEventListener("error", () => {
-    if (selectedFile && !exporting) {
-      setMessage("تعذر تشغيل الفيديو. جرّب MP4 بترميز H.264.");
-    }
-  });
-
-  document.querySelectorAll(".ai-btn").forEach(button => {
-    button.addEventListener("click", () => applyEffect(button.dataset.effect));
-  });
-
-  ["captionText","volumeRange","brightnessRange","contrastRange"]
-    .forEach(id => $(id).addEventListener("input", updatePreview));
-
-  $("resetBtn").addEventListener("click", () => {
-    if (exporting) return;
-
-    currentEffect = "normal";
-    $("captionText").value = "";
-    $("volumeRange").value = "100";
-    $("brightnessRange").value = "100";
-    $("contrastRange").value = "100";
-
-    updatePreview();
-    showEffectButtons();
-    setTask("تمت إعادة الإعدادات", "يمكنك البدء من جديد.");
-    setMessage("تمت إعادة التأثيرات إلى الإعدادات الأصلية.");
-  });
-
-  function removeVideo() {
-    if (exporting) return;
-
-    video.pause();
-    video.removeAttribute("src");
-    video.load();
-
-    if (videoURL) URL.revokeObjectURL(videoURL);
-
-    videoURL = null;
-    selectedFile = null;
-    video.style.display = "none";
-    dropZone.style.display = "flex";
-    captionPreview.style.display = "none";
-    exportBtn.disabled = true;
-    removeBtn.disabled = true;
-
-    setTask("جاهز لاستقبال الفيديو", "اختَر فيديو للبدء.");
-    setMessage("تمت إزالة الفيديو.");
-  }
-
-  removeBtn.addEventListener("click", removeVideo);
-
-  function drawFrame(ctx, canvas) {
-    if (!video.videoWidth || !video.videoHeight) return;
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    ctx.save();
-    ctx.filter = filterString();
-
-    const scale = Math.min(
-      canvas.width / video.videoWidth,
-      canvas.height / video.videoHeight
-    );
-
-    const width = video.videoWidth * scale;
-    const height = video.videoHeight * scale;
-
-    ctx.drawImage(
-      video,
-      (canvas.width - width) / 2,
-      (canvas.height - height) / 2,
-      width,
-      height
-    );
-    ctx.restore();
-
-    const caption = $("captionText").value.trim();
-    if (!caption) return;
-
-    ctx.save();
-    const fontSize = Math.max(18, Math.round(canvas.width * 0.035));
-    ctx.font = `bold ${fontSize}px Cairo, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "bottom";
-    ctx.direction = "rtl";
-    ctx.lineJoin = "round";
-    ctx.lineWidth = Math.max(3, fontSize * 0.12);
-    ctx.strokeStyle = "#000";
-    ctx.fillStyle = "#fff";
-
-    const maxWidth = canvas.width * 0.9;
-    const lines = [];
-    let line = "";
-
-    for (const word of caption.split(/\s+/)) {
-      const candidate = line ? line + " " + word : word;
-      if (ctx.measureText(candidate).width > maxWidth && line) {
-        lines.push(line);
-        line = word;
-      } else {
-        line = candidate;
-      }
-    }
-    if (line) lines.push(line);
-
-    const shownLines = lines.slice(-3);
-    const lineHeight = fontSize * 1.35;
-    const bottom = canvas.height * 0.08;
-
-    shownLines.forEach((text, index) => {
-      const y = canvas.height - bottom -
-        (shownLines.length - 1 - index) * lineHeight;
-      ctx.strokeText(text, canvas.width / 2, y, maxWidth);
-      ctx.fillText(text, canvas.width / 2, y, maxWidth);
-    });
-    ctx.restore();
-  }
-
-  function chooseRecorderType() {
-    if (!window.MediaRecorder) return "";
-    const types = [
-      "video/webm;codecs=vp9,opus",
-      "video/webm;codecs=vp8,opus",
-      "video/webm"
-    ];
-    return types.find(type => MediaRecorder.isTypeSupported(type)) || "";
-  }
-
-  function waitForSeek(time) {
-    return new Promise((resolve, reject) => {
-      if (Math.abs(video.currentTime - time) < 0.05) {
-        resolve();
-        return;
-      }
-
-      const timeout = setTimeout(() => {
-        cleanup();
-        reject(new Error("انتهت مهلة الانتقال إلى موضع الفيديو."));
-      }, 10000);
-
-      function cleanup() {
-        clearTimeout(timeout);
-        video.removeEventListener("seeked", done);
-        video.removeEventListener("error", failed);
-      }
-
-      function done() {
-        cleanup();
-        resolve();
-      }
-
-      function failed() {
-        cleanup();
-        reject(new Error("تعذر الانتقال إلى الموضع المطلوب."));
-      }
-
-      video.addEventListener("seeked", done, { once: true });
-      video.addEventListener("error", failed, { once: true });
-
-      try {
-        video.currentTime = time;
-      } catch (error) {
-        cleanup();
-        reject(error);
-      }
-    });
-  }
-
-  function stopExportResources() {
-    if (exportFrame !== null) {
-      cancelAnimationFrame(exportFrame);
-      exportFrame = null;
-    }
-
-    if (exportTimer !== null) {
-      clearInterval(exportTimer);
-      exportTimer = null;
-    }
-
-    if (videoStream) {
-      videoStream.getTracks().forEach(track => track.stop());
-      videoStream = null;
-    }
-
-    if (exportStream) {
-      exportStream.getTracks().forEach(track => track.stop());
-      exportStream = null;
-    }
-
-    exportCanvas = null;
-  }
-
-  function downloadBlob(blob) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "abdo-ai-edited-video.webm";
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
-    setMessage("تم تصدير وتحميل الفيديو بنجاح!");
-  }
-
-  async function startExport() {
-    if (!selectedFile || exporting) return;
-
-    const startTime = Math.max(0, parseFloat($("startTime").value) || 0);
-    const durationLimit = parseFloat($("endTime").value);
-    const endTime = (!isNaN(durationLimit) && durationLimit > startTime) 
-      ? Math.min(video.duration, durationLimit) 
-      : video.duration;
-
-    if (startTime >= endTime) {
-      alert("وقت البداية يجب أن يكون أقل من وقت النهاية!");
-      return;
-    }
-
-    const mimeType = chooseRecorderType();
-    if (!mimeType) {
-      alert("متصفحك لا يدعم تصدير الفيديو بهذه الطريقة. حاول استخدام متصفح حديث مثل Google Chrome.");
-      return;
-    }
-
-    setBusy(true);
-    overlay.style.display = "flex";
-    progressBar.style.width = "0%";
-    progressText.textContent = "0%";
-    statusText.textContent = "جارٍ إعداد محرك التصدير...";
-    setMessage("جارٍ معالجة وتصدير الفيديو...");
-
-    stopRequested = false;
-    exportCanvas = document.createElement("canvas");
-    exportCanvas.width = video.videoWidth || 1280;
-    exportCanvas.height = video.videoHeight || 720;
-    const ctx = exportCanvas.getContext("2d");
-
-    try {
-      exportStream = exportCanvas.captureStream(30);
-      
-      if (currentEffect !== "mute" && typeof video.captureStream === "function") {
-        try {
-          videoStream = video.captureStream();
-          const audioTracks = videoStream.getAudioTracks();
-          if (audioTracks.length > 0) {
-            audioTracks.forEach(track => exportStream.addTrack(track));
-          }
-        } catch (e) {
-          console.log("Audio capture skipped:", e);
-        }
-      }
-
-      exportRecorder = new MediaRecorder(exportStream, { mimeType });
-      const chunks = [];
-
-      exportRecorder.ondataavailable = e => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-
-      exportRecorder.onstop = () => {
-        stopExportResources();
-        setBusy(false);
-        overlay.style.display = "none";
-        if (!stopRequested && chunks.length > 0) {
-          const blob = new Blob(chunks, { type: mimeType });
-          downloadBlob(blob);
-        } else {
-          setMessage("تم إلغاء التصدير.");
-        }
-      };
-
-      video.pause();
-      await waitForSeek(startTime);
-
-      exportRecorder.start();
-      video.playbackRate = 1.0;
-      await video.play();
-
-      const totalDuration = endTime - startTime;
-
-      exportTimer = setInterval(() => {
-        const currentProgressTime = video.currentTime - startTime;
-        const progress = Math.min(100, Math.max(0, (currentProgressTime / totalDuration) * 100));
-        
-        progressBar.style.width = progress.toFixed(1) + "%";
-        progressText.textContent = progress.toFixed(0) + "%";
-        statusText.textContent = `جارٍ تصدير الفيديو (${progress.toFixed(0)}%)...`;
-
-        drawFrame(ctx, exportCanvas);
-
-        if (video.currentTime >= endTime || video.ended) {
-          clearInterval(exportTimer);
-          exportTimer = null;
-          video.pause();
-          if (exportRecorder && exportRecorder.state === "recording") {
-            exportRecorder.stop();
-          }
-        }
-      }, 50);
-
-    } catch (err) {
-      console.error(err);
-      stopExportResources();
-      setBusy(false);
-      overlay.style.display = "none";
-      alert("حدث خطأ أثناء تصدير الفيديو: " + err.message);
-      setMessage("فشل التصدير.");
-    }
-  }
-
-  exportBtn.addEventListener("click", startExport);
-})();
-</script>
-</body>
-</html>
+
+def cleanup_directory(path):
+    if path:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def close_clip(clip):
+    if clip is not None:
+        try:
+            clip.close()
+        except Exception:
+            logger.warning("Could not close a video resource", exc_info=True)
+
+
+def prepare_arabic_text(text):
+    """
+    تجهيز النص العربي للعرض.
+    يحتاج arabic-reshaper و python-bidi.
+    """
+    try:
+        import arabic_reshaper
+        from bidi.algorithm import get_display
+
+        return get_display(arabic_reshaper.reshape(text))
+    except ImportError:
+        logger.warning(
+            "Arabic shaping packages are missing; using original text"
+        )
+        return text
+    except Exception:
+        logger.exception("Arabic text shaping failed")
+        return text
+
+
+def get_font_path():
+    candidates = [
+        ARABIC_FONT_PATH,
+        "/usr/share/fonts/truetype/cairo/Cairo-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/tahoma.ttf",
+    ]
+
+    for candidate in candidates:
+        if candidate and Path(candidate).is_file():
+            return str(Path(candidate).resolve())
+
+    raise RuntimeError(
+        "Arabic font not found. Set ARABIC_FONT_PATH "
+        "to the full path of an installed font file."
+    )
+
+
+def make_zoom_clip(video, zoom_factor):
+    """
+    تكبير الفيديو ثم قص الزوائد من المنتصف للحفاظ
+    على أبعاد الفيديو الأصلية.
+    """
+    if zoom_factor < 1.0 or zoom_factor > 2.0:
+        raise ValueError("ZOOM_FACTOR must be between 1.0 and 2.0")
+
+    if zoom_factor == 1.0:
+        return video
+
+    zoomed = video.resized(zoom_factor)
+
+    # قص الجزء الأوسط بعد التكبير وإرجاع الأبعاد الأصلية.
+    zoomed = zoomed.cropped(
+        x_center=zoomed.w / 2,
+        y_center=zoomed.h / 2,
+        width=video.w,
+        height=video.h
+    )
+
+    return zoomed.with_duration(video.duration)
+
+
+def make_caption(text, start, duration, video, font_path):
+    caption_width = max(1, int(video.w * 0.85))
+    font_size = max(22, min(54, int(video.w * 0.04)))
+
+    caption = TextClip(
+        text=prepare_arabic_text(text),
+        font=font_path,
+        font_size=font_size,
+        color="white",
+        stroke_color="black",
+        stroke_width=2,
+        method="caption",
+        size=(caption_width, None),
+        text_align="center",
+        horizontal_align="center",
+        margin=(12, 8)
+    )
+
+    return (
+        caption
+        .with_start(start)
+        .with_duration(duration)
+        .with_position(("center", int(video.h * 0.76)))
+    )
+
+
+@app.post("/process-video/")
+async def process_video(file: UploadFile = File(...)):
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail="AI model is not ready. Try again shortly."
+        )
+
+    original_name = file.filename or "video.mp4"
+    extension = Path(original_name).suffix.lower()
+
+    if extension not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail="Unsupported video format."
+        )
+
+    try:
+        os.makedirs(TEMP_ROOT, exist_ok=True)
+        work_dir = tempfile.mkdtemp(
+            prefix="abdo_video_",
+            dir=TEMP_ROOT
+        )
+    except OSError:
+        logger.exception("Could not create temporary directory")
+        raise HTTPException(
+            status_code=500,
+            detail="Could not prepare video processing storage."
+        )
+
+    input_path = os.path.join(
+        work_dir, f"{uuid.uuid4().hex}{extension}"
+    )
+    output_path = os.path.join(
+        work_dir, f"{uuid.uuid4().hex}_edited.mp4"
+    )
+
+    video = None
+    zoomed_video = None
+    final_video = None
+    caption_clips = []
+
+    try:
+        # ---------------------------------------------
+        # 1. حفظ الفيديو والتحقق من حجم الملف
+        # ---------------------------------------------
+        total_bytes = 0
+
+        with open(input_path, "wb") as output_file:
+            while True:
+                chunk = await file.read(1024 * 1024)
+
+                if not chunk:
+                    break
+
+                total_bytes += len(chunk)
+
+                if total_bytes > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Video exceeds the {MAX_UPLOAD_MB} MB limit."
+                    )
+
+                output_file.write(chunk)
+
+        if total_bytes == 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded video is empty."
+            )
+
+        # ---------------------------------------------
+        # 2. تفريغ الكلام باستخدام Whisper
+        # ---------------------------------------------
+        logger.info("Transcribing uploaded video")
+
+        result = model.transcribe(
+            input_path,
+            task="transcribe",
+            word_timestamps=True,
+            verbose=False
+        )
+
+        segments = result.get("segments", [])
+
+        # ---------------------------------------------
+        # 3. فتح الفيديو والخط العربي
+        # ---------------------------------------------
+        video = VideoFileClip(input_path)
+
+        if video.duration <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail="The uploaded video has no valid duration."
+            )
+
+        font_path = get_font_path()
+
+        # ---------------------------------------------
+        # 4. تطبيق الزووم فعليًا على الفيديو الأساسي
+        # ---------------------------------------------
+        zoomed_video = make_zoom_clip(video, ZOOM_FACTOR)
+
+        # ---------------------------------------------
+        # 5. إنشاء الترجمة المتزامنة مع الكلام
+        # ---------------------------------------------
+        for segment in segments:
+            text = str(segment.get("text", "")).strip()
+
+            start = max(
+                0.0,
+                float(segment.get("start", 0.0))
+            )
+
+            end = min(
+                float(video.duration),
+                float(segment.get("end", start))
+            )
+
+            duration = end - start
+
+            if not text or duration <= 0:
+                continue
+
+            caption = make_caption(
+                text=text,
+                start=start,
+                duration=duration,
+                video=video,
+                font_path=font_path
+            )
+
+            caption_clips.append(caption)
+
+        # ---------------------------------------------
+        # 6. دمج الفيديو المكبّر والترجمة
+        # ---------------------------------------------
+        final_video = CompositeVideoClip(
+            [zoomed_video] + caption_clips,
+            size=video.size
+        ).with_duration(video.duration)
+
+        # الاحتفاظ بصوت الفيديو الأصلي عند وجوده
+        if zoomed_video.audio is not None:
+            final_video = final_video.with_audio(zoomed_video.audio)
+
+        # ---------------------------------------------
+        # 7. تصدير الفيديو النهائي بصيغة MP4
+        # ---------------------------------------------
+        logger.info("Rendering final MP4 video")
+
+        final_video.write_videofile(
+            output_path,
+            fps=OUTPUT_FPS,
+            codec="libx264",
+            audio_codec="aac",
+            preset="medium",
+            threads=2,
+            logger=None,
+            ffmpeg_params=["-movflags", "+faststart"]
+        )
+
+        if not os.path.isfile(output_path):
+            raise RuntimeError("MP4 output was not created.")
+
+        if os.path.getsize(output_path) == 0:
+            raise RuntimeError("The exported MP4 file is empty.")
+
+        logger.info("Video processing completed successfully")
+
+        # إغلاق موارد الفيديو قبل إرسال الملف
+        close_clip(final_video)
+        final_video = None
+
+        # إغلاق مقاطع الترجمة
+        for caption in caption_clips:
+            close_clip(caption)
+
+        caption_clips.clear()
+
+        close_clip(zoomed_video)
+        zoomed_video = None
+
+        close_clip(video)
+        video = None
+
+        return FileResponse(
+            path=output_path,
+            media_type="video/mp4",
+            filename="abdo_zoom_pro_edited.mp4",
+            background=BackgroundTask(
+                cleanup_directory,
+                work_dir
+            )
+        )
+
+    except HTTPException:
+        cleanup_directory(work_dir)
+        raise
+
+    except Exception:
+        logger.exception("Video processing failed")
+        cleanup_directory(work_dir)
+
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Video processing failed. Check the server logs "
+                "for the technical error."
+            )
+        )
+
+    finally:
+        # تنظيف الموارد حتى عند فشل المعالجة
+        close_clip(final_video)
+
+        for caption in caption_clips:
+            close_clip(caption)
+
+        close_clip(zoomed_video)
+        close_clip(video)
+
+        try:
+            await file.close()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "8000"))
+    )
