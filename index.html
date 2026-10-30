@@ -1,428 +1,592 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#080b10">
+<title>PlayCloud PS - منصة الألعاب السحابية</title>
 
-import os
-import uuid
-import shutil
-import logging
-import tempfile
-from pathlib import Path
+<script src="https://cdn.tailwindcss.com"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
 
-import whisper
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import FileResponse
-from starlette.background import BackgroundTask
-from moviepy import VideoFileClip, TextClip, CompositeVideoClip
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;
+ font-family:'Tajawal',sans-serif;
+ background:#080b10;
+ color:#e2e8f0;
+ overflow-x:hidden
+}
+.ps-glow{box-shadow:0 0 25px #0070d155}
+.neon-text{text-shadow:0 0 12px #00a8ff99}
+.game-card{transition:.25s}
+.game-card:hover{
+ transform:translateY(-6px);
+ box-shadow:0 10px 30px #0070d155
+}
+button{touch-action:manipulation}
+::-webkit-scrollbar{width:7px}
+::-webkit-scrollbar-track{background:#0f172a}
+::-webkit-scrollbar-thumb{background:#0070d1;border-radius:8px}
+.category-btn.active{background:#2563eb;color:white}
+#gameModal{display:none}
+#gameModal.open{display:flex}
 
-# =====================================================
-# Abdo AI Video Engine Pro - Version 4.1
-# Fixed Auto-Zoom + Arabic Captions + MP4 Export
-# =====================================================
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("abdo-ai-video")
-
-APP_NAME = "Abdo AI Video Engine Pro"
-APP_VERSION = "4.1"
-
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "300"))
-MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
-
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
-OUTPUT_FPS = int(os.getenv("OUTPUT_FPS", "24"))
-ZOOM_FACTOR = float(os.getenv("ZOOM_FACTOR", "1.15"))
-
-ARABIC_FONT_PATH = os.getenv("ARABIC_FONT_PATH", "")
-TEMP_ROOT = os.getenv("VIDEO_TEMP_DIR", tempfile.gettempdir())
-
-ALLOWED_EXTENSIONS = {
-    ".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"
+/* ضبط الكانفاس ليكون في الوضع الطولي (Portrait) */
+#gameCanvas{
+ width: 100%;
+ max-width: 420px; /* تحديد عرض مناسب للشاشة الطويلة */
+ height: 100%;
+ display: block;
+ margin: 0 auto;
+ touch-action: none;
+ image-rendering: pixelated;
 }
 
-app = FastAPI(
-    title=APP_NAME,
-    version=APP_VERSION,
-    description="AI transcription, Arabic captions, auto-zoom and MP4 export"
-)
-
-model = None
-
-
-@app.on_event("startup")
-def load_whisper_model():
-    global model
-
-    logger.info("Loading Whisper model: %s", WHISPER_MODEL)
-
-    try:
-        model = whisper.load_model(WHISPER_MODEL)
-        logger.info("Whisper model loaded successfully")
-    except Exception:
-        logger.exception("Whisper model could not be loaded")
-        raise
-
-
-@app.get("/")
-def home():
-    return {
-        "status": "online",
-        "service": APP_NAME,
-        "version": APP_VERSION,
-        "creator": "Abdo",
-        "features": [
-            "speech_transcription",
-            "timed_captions",
-            "arabic_caption_support",
-            "center_crop_auto_zoom",
-            "mp4_export"
-        ]
-    }
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ready" if model is not None else "loading",
-        "model": WHISPER_MODEL,
-        "version": APP_VERSION
-    }
-
-
-def cleanup_directory(path):
-    if path:
-        shutil.rmtree(path, ignore_errors=True)
-
-
-def close_clip(clip):
-    if clip is not None:
-        try:
-            clip.close()
-        except Exception:
-            logger.warning("Could not close a video resource", exc_info=True)
-
-
-def prepare_arabic_text(text):
-    """
-    تجهيز النص العربي للعرض.
-    يحتاج arabic-reshaper و python-bidi.
-    """
-    try:
-        import arabic_reshaper
-        from bidi.algorithm import get_display
-
-        return get_display(arabic_reshaper.reshape(text))
-    except ImportError:
-        logger.warning(
-            "Arabic shaping packages are missing; using original text"
-        )
-        return text
-    except Exception:
-        logger.exception("Arabic text shaping failed")
-        return text
-
-
-def get_font_path():
-    candidates = [
-        ARABIC_FONT_PATH,
-        "/usr/share/fonts/truetype/cairo/Cairo-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/tahoma.ttf",
-    ]
-
-    for candidate in candidates:
-        if candidate and Path(candidate).is_file():
-            return str(Path(candidate).resolve())
-
-    raise RuntimeError(
-        "Arabic font not found. Set ARABIC_FONT_PATH "
-        "to the full path of an installed font file."
-    )
-
-
-def make_zoom_clip(video, zoom_factor):
-    """
-    تكبير الفيديو ثم قص الزوائد من المنتصف للحفاظ
-    على أبعاد الفيديو الأصلية.
-    """
-    if zoom_factor < 1.0 or zoom_factor > 2.0:
-        raise ValueError("ZOOM_FACTOR must be between 1.0 and 2.0")
-
-    if zoom_factor == 1.0:
-        return video
-
-    zoomed = video.resized(zoom_factor)
-
-    # قص الجزء الأوسط بعد التكبير وإرجاع الأبعاد الأصلية.
-    zoomed = zoomed.cropped(
-        x_center=zoomed.w / 2,
-        y_center=zoomed.h / 2,
-        width=video.w,
-        height=video.h
-    )
-
-    return zoomed.with_duration(video.duration)
-
-
-def make_caption(text, start, duration, video, font_path):
-    caption_width = max(1, int(video.w * 0.85))
-    font_size = max(22, min(54, int(video.w * 0.04)))
-
-    caption = TextClip(
-        text=prepare_arabic_text(text),
-        font=font_path,
-        font_size=font_size,
-        color="white",
-        stroke_color="black",
-        stroke_width=2,
-        method="caption",
-        size=(caption_width, None),
-        text_align="center",
-        horizontal_align="center",
-        margin=(12, 8)
-    )
-
-    return (
-        caption
-        .with_start(start)
-        .with_duration(duration)
-        .with_position(("center", int(video.h * 0.76)))
-    )
-
-
-@app.post("/process-video/")
-async def process_video(file: UploadFile = File(...)):
-    if model is None:
-        raise HTTPException(
-            status_code=503,
-            detail="AI model is not ready. Try again shortly."
-        )
-
-    original_name = file.filename or "video.mp4"
-    extension = Path(original_name).suffix.lower()
-
-    if extension not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=415,
-            detail="Unsupported video format."
-        )
-
-    try:
-        os.makedirs(TEMP_ROOT, exist_ok=True)
-        work_dir = tempfile.mkdtemp(
-            prefix="abdo_video_",
-            dir=TEMP_ROOT
-        )
-    except OSError:
-        logger.exception("Could not create temporary directory")
-        raise HTTPException(
-            status_code=500,
-            detail="Could not prepare video processing storage."
-        )
-
-    input_path = os.path.join(
-        work_dir, f"{uuid.uuid4().hex}{extension}"
-    )
-    output_path = os.path.join(
-        work_dir, f"{uuid.uuid4().hex}_edited.mp4"
-    )
-
-    video = None
-    zoomed_video = None
-    final_video = None
-    caption_clips = []
-
-    try:
-        # ---------------------------------------------
-        # 1. حفظ الفيديو والتحقق من حجم الملف
-        # ---------------------------------------------
-        total_bytes = 0
-
-        with open(input_path, "wb") as output_file:
-            while True:
-                chunk = await file.read(1024 * 1024)
-
-                if not chunk:
-                    break
-
-                total_bytes += len(chunk)
-
-                if total_bytes > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Video exceeds the {MAX_UPLOAD_MB} MB limit."
-                    )
-
-                output_file.write(chunk)
-
-        if total_bytes == 0:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded video is empty."
-            )
-
-        # ---------------------------------------------
-        # 2. تفريغ الكلام باستخدام Whisper
-        # ---------------------------------------------
-        logger.info("Transcribing uploaded video")
-
-        result = model.transcribe(
-            input_path,
-            task="transcribe",
-            word_timestamps=True,
-            verbose=False
-        )
-
-        segments = result.get("segments", [])
-
-        # ---------------------------------------------
-        # 3. فتح الفيديو والخط العربي
-        # ---------------------------------------------
-        video = VideoFileClip(input_path)
-
-        if video.duration <= 0:
-            raise HTTPException(
-                status_code=400,
-                detail="The uploaded video has no valid duration."
-            )
-
-        font_path = get_font_path()
-
-        # ---------------------------------------------
-        # 4. تطبيق الزووم فعليًا على الفيديو الأساسي
-        # ---------------------------------------------
-        zoomed_video = make_zoom_clip(video, ZOOM_FACTOR)
-
-        # ---------------------------------------------
-        # 5. إنشاء الترجمة المتزامنة مع الكلام
-        # ---------------------------------------------
-        for segment in segments:
-            text = str(segment.get("text", "")).strip()
-
-            start = max(
-                0.0,
-                float(segment.get("start", 0.0))
-            )
-
-            end = min(
-                float(video.duration),
-                float(segment.get("end", start))
-            )
-
-            duration = end - start
-
-            if not text or duration <= 0:
-                continue
-
-            caption = make_caption(
-                text=text,
-                start=start,
-                duration=duration,
-                video=video,
-                font_path=font_path
-            )
-
-            caption_clips.append(caption)
-
-        # ---------------------------------------------
-        # 6. دمج الفيديو المكبّر والترجمة
-        # ---------------------------------------------
-        final_video = CompositeVideoClip(
-            [zoomed_video] + caption_clips,
-            size=video.size
-        ).with_duration(video.duration)
-
-        # الاحتفاظ بصوت الفيديو الأصلي عند وجوده
-        if zoomed_video.audio is not None:
-            final_video = final_video.with_audio(zoomed_video.audio)
-
-        # ---------------------------------------------
-        # 7. تصدير الفيديو النهائي بصيغة MP4
-        # ---------------------------------------------
-        logger.info("Rendering final MP4 video")
-
-        final_video.write_videofile(
-            output_path,
-            fps=OUTPUT_FPS,
-            codec="libx264",
-            audio_codec="aac",
-            preset="medium",
-            threads=2,
-            logger=None,
-            ffmpeg_params=["-movflags", "+faststart"]
-        )
-
-        if not os.path.isfile(output_path):
-            raise RuntimeError("MP4 output was not created.")
-
-        if os.path.getsize(output_path) == 0:
-            raise RuntimeError("The exported MP4 file is empty.")
-
-        logger.info("Video processing completed successfully")
-
-        # إغلاق موارد الفيديو قبل إرسال الملف
-        close_clip(final_video)
-        final_video = None
-
-        # إغلاق مقاطع الترجمة
-        for caption in caption_clips:
-            close_clip(caption)
-
-        caption_clips.clear()
-
-        close_clip(zoomed_video)
-        zoomed_video = None
-
-        close_clip(video)
-        video = None
-
-        return FileResponse(
-            path=output_path,
-            media_type="video/mp4",
-            filename="abdo_zoom_pro_edited.mp4",
-            background=BackgroundTask(
-                cleanup_directory,
-                work_dir
-            )
-        )
-
-    except HTTPException:
-        cleanup_directory(work_dir)
-        raise
-
-    except Exception:
-        logger.exception("Video processing failed")
-        cleanup_directory(work_dir)
-
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Video processing failed. Check the server logs "
-                "for the technical error."
-            )
-        )
-
-    finally:
-        # تنظيف الموارد حتى عند فشل المعالجة
-        close_clip(final_video)
-
-        for caption in caption_clips:
-            close_clip(caption)
-
-        close_clip(zoomed_video)
-        close_clip(video)
-
-        try:
-            await file.close()
-        except Exception:
-            pass
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        app,
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000"))
-    )
+.control-btn{
+ width:48px;height:48px;border-radius:12px;
+ background:#334155dd;color:white;font-size:20px;
+ display:flex;align-items:center;justify-content:center;
+ border:1px solid #64748b
+}
+.control-btn:active{background:#2563eb}
+.action-btn{
+ width:48px;height:48px;border-radius:50%;
+ color:white;font-size:20px;font-weight:bold;
+ display:flex;align-items:center;justify-content:center
+}
+#mobileControls{pointer-events:none}
+#mobileControls button{pointer-events:auto;user-select:none}
+</style>
+</head>
+
+<body class="min-h-screen flex flex-col">
+
+<header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-blue-900/40 px-4 md:px-6 py-4">
+<div class="max-w-7xl mx-auto flex items-center justify-between gap-3">
+
+<div class="flex items-center gap-3">
+<div class="bg-blue-600 text-white p-3 rounded-xl ps-glow">
+<i class="fa-brands fa-playstation text-2xl"></i>
+</div>
+<div>
+<h1 class="text-xl md:text-2xl font-black text-white neon-text">
+PLAY<span class="text-blue-500">CLOUD</span>
+</h1>
+<p class="text-xs text-blue-400 font-bold">منصة الألعاب السحابية</p>
+</div>
+</div>
+
+<div class="hidden md:flex items-center bg-slate-800 rounded-full px-4 py-2 border border-slate-700 w-1/3">
+<i class="fa-solid fa-magnifying-glass text-slate-400 ml-2"></i>
+<input id="searchInput" type="search"
+placeholder="ابحث عن لعبتك المفضلة..."
+class="bg-transparent outline-none text-white text-sm w-full">
+</div>
+
+<div class="flex items-center gap-3">
+<div id="gamepadStatus" class="hidden lg:flex items-center gap-2 bg-slate-800 px-3 py-2 rounded-lg text-xs text-slate-400">
+<i class="fa-solid fa-gamepad" id="gamepadIcon"></i>
+<span id="gamepadText">انتظر ذراع التحكم</span>
+</div>
+<div class="flex items-center gap-2 bg-blue-600/20 border border-blue-500/30 px-3 py-2 rounded-full">
+<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+<span class="text-xs font-bold text-blue-300">المنصة جاهزة</span>
+</div>
+</div>
+</div>
+
+<div class="md:hidden mt-4">
+<div class="flex items-center bg-slate-800 rounded-xl px-4 py-3 border border-slate-700">
+<i class="fa-solid fa-magnifying-glass text-slate-400 ml-2"></i>
+<input id="mobileSearch" type="search"
+placeholder="ابحث عن لعبة..."
+class="bg-transparent outline-none text-white text-sm w-full">
+</div>
+</div>
+</header>
+
+<main class="container mx-auto px-4 py-7 flex-1 max-w-7xl">
+
+<section class="relative rounded-3xl overflow-hidden mb-9 bg-gradient-to-r from-blue-950 via-slate-900 to-indigo-950 border border-blue-500/20 p-7 md:p-12 flex flex-col md:flex-row items-center justify-between gap-7">
+<div class="space-y-4 max-w-xl relative z-10">
+<span class="bg-blue-600/30 text-blue-400 text-xs font-bold px-3 py-2 rounded-full border border-blue-500/30">
+PLAYCLOUD GAMING
+</span>
+<h2 class="text-3xl md:text-5xl font-black text-white leading-tight">
+عالم الألعاب يبدأ من هنا!
+</h2>
+<p class="text-slate-400 text-sm md:text-base">
+اكتشف مكتبة الألعاب واستمتع بالتجربة التجريبية مباشرة من متصفحك.
+</p>
+<button id="startBtn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 py-3 rounded-xl transition ps-glow">
+<i class="fa-solid fa-play ml-2"></i>
+ابدأ اللعب الآن
+</button>
+</div>
+<div class="text-blue-500/20 text-9xl hidden md:block">
+<i class="fa-brands fa-playstation"></i>
+</div>
+</section>
+
+<section class="mb-6">
+<h2 class="text-xl font-black text-white mb-4">
+<i class="fa-solid fa-layer-group text-blue-500 ml-2"></i>
+مكتبة الألعاب
+</h2>
+
+<div class="flex gap-2 overflow-x-auto pb-3" id="categories">
+<button data-category="all" class="category-btn active px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">الكل</button>
+<button data-category="action" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">أكشن ومغامرات</button>
+<button data-category="sports" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">كرة قدم ورياضة</button>
+<button data-category="racing" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">سباقات</button>
+</div>
+</section>
+
+<div id="resultCount" class="text-xs text-slate-500 mb-4"></div>
+
+<section id="gamesContainer" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5"></section>
+
+<div id="emptyMessage" class="hidden text-center py-16 text-slate-500">
+<i class="fa-solid fa-gamepad text-4xl mb-4"></i>
+<p>لم يتم العثور على ألعاب مطابقة لبحثك.</p>
+</div>
+
+<section class="mt-10 bg-slate-900 border border-slate-800 rounded-2xl p-5">
+<h3 class="font-bold text-white mb-2">
+<i class="fa-solid fa-circle-info text-blue-400 ml-2"></i>
+معلومات عن المنصة
+</h3>
+<p class="text-sm text-slate-400 leading-7">
+هذه النسخة تحتوي على واجهة مكتبة ألعاب ومحرك تجريبي يعمل داخل المتصفح. تشغيل ألعاب PlayStation الأصلية عن بُعد يتطلب خدمة بث ألعاب وخادماً متصلاً بها.
+</p>
+</section>
+</main>
+
+<!-- نافذة اللعب -->
+<div id="gameModal" class="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex-col p-3 md:p-6">
+
+<div class="flex items-center justify-between border-b border-slate-800 pb-3">
+<div class="flex items-center gap-3">
+<i class="fa-brands fa-playstation text-blue-500 text-2xl"></i>
+<div>
+<h3 id="modalGameTitle" class="font-bold text-white">اللعبة</h3>
+<p class="text-xs text-slate-500">وضع الشاشة الطويلة (Portrait Mode)</p>
+</div>
+</div>
+
+<div class="flex items-center gap-4">
+<button id="fullscreenBtn" class="text-slate-400 hover:text-white text-xl" title="ملء الشاشة">
+<i class="fa-solid fa-expand"></i>
+</button>
+<button id="closeBtn" class="text-red-500 hover:text-red-400 text-2xl" title="إغلاق">
+<i class="fa-solid fa-xmark"></i>
+</button>
+</div>
+</div>
+
+<div id="gameArea" class="relative flex-1 min-h-0 my-3 bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
+<canvas id="gameCanvas"></canvas>
+
+<div id="mobileControls" class="absolute bottom-4 left-3 right-3 flex justify-between items-end md:hidden">
+<div class="grid grid-cols-3 gap-1">
+<div></div>
+<button class="control-btn" data-action="UP"><i class="fa-solid fa-caret-up"></i></button>
+<div></div>
+<button class="control-btn" data-action="LEFT"><i class="fa-solid fa-caret-left"></i></button>
+<div></div>
+<button class="control-btn" data-action="RIGHT"><i class="fa-solid fa-caret-right"></i></button>
+<div></div>
+<button class="control-btn" data-action="DOWN"><i class="fa-solid fa-caret-down"></i></button>
+<div></div>
+</div>
+
+<div class="grid grid-cols-2 gap-2">
+<button class="action-btn bg-blue-600" data-action="ACTION_X">✕</button>
+<button class="action-btn bg-red-600" data-action="ACTION_O">◯</button>
+<button class="action-btn bg-pink-600" data-action="ACTION_SQ">▢</button>
+<button class="action-btn bg-green-600" data-action="ACTION_TR">△</button>
+</div>
+</div>
+
+<div class="absolute top-3 right-3 bg-black/70 rounded-lg px-3 py-2 text-xs text-white">
+النقاط: <span id="score">0</span> | <span class="text-blue-400 font-mono">Portrait Mode</span>
+</div>
+</div>
+
+<div class="flex items-center justify-between gap-2 text-xs text-slate-400 border-t border-slate-800 pt-3">
+<p>الأسهم للتحرك و Space لجمع النجوم. يدعم ذراع التحكم.</p>
+<button id="restartBtn" class="bg-blue-600 px-4 py-2 rounded-lg text-white font-bold">
+<i class="fa-solid fa-rotate-right ml-1"></i> إعادة اللعب
+</button>
+</div>
+</div>
+
+<footer class="bg-slate-900/60 border-t border-slate-800 py-6 text-center text-slate-500 text-sm">
+تم التطوير بواسطة <span class="text-blue-400 font-bold">عبده</span>
+© 2026 - PlayCloud PS
+</footer>
+
+<script>
+"use strict";
+
+/* قاعدة الألعاب */
+const games = [
+{id:1,title:"eFootball 2026",category:"sports",rating:"4.9",icon:"fa-futbol",bg:"from-blue-600 to-indigo-900",color:"#0070d1"},
+{id:2,title:"Spider-Man PS5",category:"action",rating:"4.8",icon:"fa-spider",bg:"from-red-600 to-slate-900",color:"#e11d48"},
+{id:3,title:"God of War Ragnarök",category:"action",rating:"5.0",icon:"fa-shield-halved",bg:"from-slate-700 to-blue-950",color:"#38bdf8"},
+{id:4,title:"Need for Speed Unbound",category:"racing",rating:"4.7",icon:"fa-car-side",bg:"from-amber-500 to-slate-900",color:"#f59e0b"},
+{id:5,title:"EA Sports FC 26",category:"sports",rating:"4.9",icon:"fa-trophy",bg:"from-emerald-600 to-slate-900",color:"#10b981"},
+{id:6,title:"GTA V Cloud Edition",category:"action",rating:"4.9",icon:"fa-mask",bg:"from-purple-600 to-slate-900",color:"#a855f7"},
+{id:7,title:"Gran Turismo 7",category:"racing",rating:"4.8",icon:"fa-gauge-high",bg:"from-cyan-600 to-slate-900",color:"#06b6d4"},
+{id:8,title:"Tekken 8",category:"action",rating:"4.7",icon:"fa-hand-fist",bg:"from-rose-600 to-slate-900",color:"#f43f5e"}
+];
+
+/* عناصر الصفحة */
+const $ = id => document.getElementById(id);
+const container = $("gamesContainer");
+const modal = $("gameModal");
+const canvas = $("gameCanvas");
+const ctx = canvas.getContext("2d");
+
+let selectedCategory = "all";
+let searchTerm = "";
+let currentGame = null;
+let animationId = null;
+let lastFrame = 0;
+let player = {x:100,y:100,size:14,speed:3.5};
+let star = {x:200,y:150,size:8};
+let score = 0;
+let keys = {};
+let gamepadConnected = false;
+let audioCtx = null;
+
+/* صوت بسيط */
+function beep(freq=440,duration=.07){
+ try{
+  audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
+  if(audioCtx.state==="suspended") audioCtx.resume();
+  const osc=audioCtx.createOscillator();
+  const gain=audioCtx.createGain();
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.frequency.value=freq;
+  gain.gain.setValueAtTime(.07,audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+duration);
+  osc.start();
+  osc.stop(audioCtx.currentTime+duration);
+ }catch(e){}
+}
+
+/* عرض الألعاب */
+function renderGames(){
+ const filtered=games.filter(game=>{
+  const categoryMatch=selectedCategory==="all" || game.category===selectedCategory;
+  const searchMatch=game.title.toLowerCase().includes(searchTerm.toLowerCase());
+  return categoryMatch && searchMatch;
+ });
+
+ container.innerHTML="";
+ $("resultCount").textContent="عدد الألعاب: "+filtered.length;
+ $("emptyMessage").classList.toggle("hidden",filtered.length!==0);
+
+ filtered.forEach(game=>{
+  const card=document.createElement("article");
+  card.className="game-card bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden cursor-pointer";
+
+  const image=document.createElement("div");
+  image.className="h-44 bg-gradient-to-br "+game.bg+" flex items-center justify-center relative";
+
+  const icon=document.createElement("i");
+  icon.className="fa-solid "+game.icon+" text-6xl text-white/80";
+  image.appendChild(icon);
+
+  const rating=document.createElement("span");
+  rating.className="absolute top-3 left-3 bg-black/70 text-amber-400 text-xs px-3 py-1 rounded-full";
+  rating.innerHTML='<i class="fa-solid fa-star"></i> '+game.rating;
+  image.appendChild(rating);
+
+  const info=document.createElement("div");
+  info.className="p-4 flex items-center justify-between gap-2";
+
+  const text=document.createElement("div");
+  const title=document.createElement("h3");
+  title.className="font-bold text-white text-base";
+  title.textContent=game.title;
+
+  const desc=document.createElement("p");
+  desc.className="text-xs text-slate-500 mt-1";
+  desc.textContent="تجربة متصفح تجريبية";
+
+  text.append(title,desc);
+
+  const button=document.createElement("button");
+  button.className="bg-blue-600/20 text-blue-400 p-3 rounded-xl";
+  button.innerHTML='<i class="fa-solid fa-play"></i>';
+  button.setAttribute("aria-label","ابدأ اللعبة");
+
+  info.append(text,button);
+  card.append(image,info);
+  card.addEventListener("click",()=>launchGame(game));
+  container.appendChild(card);
+ });
+}
+
+/* البحث */
+function updateSearch(value){
+ searchTerm=value.trim();
+ $("searchInput").value=value;
+ $("mobileSearch").value=value;
+ renderGames();
+}
+$("searchInput").addEventListener("input",e=>updateSearch(e.target.value));
+$("mobileSearch").addEventListener("input",e=>updateSearch(e.target.value));
+
+/* التصنيفات */
+document.querySelectorAll(".category-btn").forEach(button=>{
+ button.addEventListener("click",()=>{
+  selectedCategory=button.dataset.category;
+  document.querySelectorAll(".category-btn").forEach(b=>b.classList.remove("active"));
+  button.classList.add("active");
+  beep(600);
+  renderGames();
+ });
+});
+
+/* فتح اللعبة */
+function launchGame(game){
+ stopLoop();
+ currentGame=game;
+ $("modalGameTitle").textContent=game.title;
+ modal.classList.add("open");
+ modal.setAttribute("aria-hidden","false");
+ resizeCanvas();
+ resetGame();
+ lastFrame=0;
+ animationId=requestAnimationFrame(loop);
+}
+
+/* إيقاف الرسم */
+function stopLoop(){
+ if(animationId!==null){
+  cancelAnimationFrame(animationId);
+  animationId=null;
+ }
+}
+
+/* إعادة اللعبة */
+function resetGame(){
+ player={x:canvas.width/2,y:canvas.height/2,size:14,speed:3.5};
+ score=0;
+ $("score").textContent=score;
+ randomStar();
+}
+
+/* ضبط مساحة الرسم: تحويل الشاشة لوضع الطولي Portrait (ارتفاع أكبر من العرض) */
+function resizeCanvas(){
+ const targetWidth = 360; // العرض الثابت في الوضع الطولي
+ const targetHeight = 640; // الارتفاع الطولي المخصص للموبايل والشاشات الطويلة
+ 
+ canvas.width = targetWidth;
+ canvas.height = targetHeight;
+ 
+ ctx.imageSmoothingEnabled = false;
+ player.x = canvas.width / 2;
+ player.y = canvas.height / 2;
+}
+
+/* نجمة جديدة */
+function randomStar(){
+ star={
+  x:20+Math.random()*(canvas.width-40),
+  y:20+Math.random()*(canvas.height-40),
+  size:8
+ };
+}
+
+/* الرسم بالشاشة الطويلة */
+function loop(time){
+ if(!currentGame || !modal.classList.contains("open")) return;
+
+ const width = canvas.width;
+ const height = canvas.height;
+ const delta=lastFrame?Math.min((time-lastFrame)/16.67,2):1;
+ lastFrame=time;
+
+ ctx.clearRect(0,0,width,height);
+ ctx.fillStyle="#090d16";
+ ctx.fillRect(0,0,width,height);
+
+ /* شبكة الخلفية */
+ ctx.strokeStyle="#1e293b";
+ ctx.lineWidth=1;
+ for(let x=0;x<width;x+=30){
+  ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,height);ctx.stroke();
+ }
+ for(let y=0;y<height;y+=30){
+  ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(width,y);ctx.stroke();
+ }
+
+ /* التحكم بالكيبورد */
+ let dx=0,dy=0;
+ if(keys.ArrowLeft||keys.a)dx--;
+ if(keys.ArrowRight||keys.d)dx++;
+ if(keys.ArrowUp||keys.w)dy--;
+ if(keys.ArrowDown||keys.s)dy++;
+
+ /* قراءة ذراع التحكم */
+ const pads=navigator.getGamepads?navigator.getGamepads():[];
+ const pad=pads?Array.from(pads).find(p=>p&&p.connected):null;
+ if(pad){
+  if(Math.abs(pad.axes[0]||0)>.2)dx=pad.axes[0];
+  if(Math.abs(pad.axes[1]||0)>.2)dy=pad.axes[1];
+  if(pad.buttons[0]?.pressed)collectStar();
+ }
+
+ const length=Math.hypot(dx,dy)||1;
+ player.x+=(dx/length)*player.speed*delta;
+ player.y+=(dy/length)*player.speed*delta;
+
+ player.x=Math.max(player.size,Math.min(width-player.size,player.x));
+ player.y=Math.max(player.size,Math.min(height-player.size,player.y));
+
+ /* النجمة */
+ ctx.save();
+ ctx.fillStyle="#facc15";
+ ctx.font="20px Arial";
+ ctx.textAlign="center";
+ ctx.fillText("★",star.x,star.y+7);
+ ctx.restore();
+
+ /* اللاعب */
+ ctx.save();
+ ctx.fillStyle=currentGame.color;
+ ctx.beginPath();
+ ctx.arc(player.x,player.y,player.size,0,Math.PI*2);
+ ctx.fill();
+ ctx.fillStyle="#fff";
+ ctx.font="bold 9px Tajawal";
+ ctx.textAlign="center";
+ ctx.textBaseline="middle";
+ ctx.fillText("PS",player.x,player.y);
+ ctx.restore();
+
+ /* جمع النجمة */
+ if(Math.hypot(player.x-star.x,player.y-star.y)<player.size+star.size){
+  collectStar();
+ }
+
+ animationId=requestAnimationFrame(loop);
+}
+
+/* جمع النجوم */
+function collectStar(){
+ score++;
+ $("score").textContent=score;
+ beep(800,.08);
+ randomStar();
+}
+
+/* التحكم باللمس */
+function touchAction(action){
+ const step=18;
+ if(action==="UP")player.y-=step;
+ if(action==="DOWN")player.y+=step;
+ if(action==="LEFT")player.x-=step;
+ if(action==="RIGHT")player.x+=step;
+ if(action.startsWith("ACTION"))collectStar();
+ beep(500,.04);
+}
+
+document.querySelectorAll("[data-action]").forEach(button=>{
+ button.addEventListener("pointerdown",e=>{
+  e.preventDefault();
+  touchAction(button.dataset.action);
+ });
+});
+
+/* الكيبورد */
+window.addEventListener("keydown",e=>{
+ if(!modal.classList.contains("open"))return;
+ if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key))e.preventDefault();
+ keys[e.key]=true;
+ if(e.key===" " && !e.repeat)collectStar();
+});
+window.addEventListener("keyup",e=>{keys[e.key]=false});
+
+/* ذراع التحكم */
+window.addEventListener("gamepadconnected",e=>{
+ gamepadConnected=true;
+ $("gamepadText").textContent="تم توصيل الذراع";
+ $("gamepadIcon").classList.add("text-green-400");
+ beep(700);
+});
+window.addEventListener("gamepaddisconnected",()=>{
+ gamepadConnected=false;
+ $("gamepadText").textContent="تم فصل الذراع";
+ $("gamepadIcon").classList.remove("text-green-400");
+});
+
+/* إغلاق اللعبة */
+function closeGame(){
+ stopLoop();
+ currentGame=null;
+ keys={};
+ modal.classList.remove("open");
+ modal.setAttribute("aria-hidden","true");
+ beep(300);
+}
+$("closeBtn").addEventListener("click",closeGame);
+
+/* إعادة اللعب */
+$("restartBtn").addEventListener("click",()=>{
+ resetGame();
+ beep(500);
+});
+
+/* ملء الشاشة */
+$("fullscreenBtn").addEventListener("click",async()=>{
+ try{
+  if(!document.fullscreenElement){
+   await $("gameArea").requestFullscreen();
+  }else{
+   await document.exitFullscreen();
+  }
+ }catch(e){
+  alert("متصفحك لا يدعم وضع ملء الشاشة.");
+ }
+});
+
+/* تغيير حجم الشاشة */
+window.addEventListener("resize",()=>{
+ if(modal.classList.contains("open"))resizeCanvas();
+});
+
+/* زر البداية */
+$("startBtn").addEventListener("click",()=>{
+ $("gamesContainer").scrollIntoView({behavior:"smooth"});
+});
+
+/* منع استمرار اللعبة عند إخفاء الصفحة */
+document.addEventListener("visibilitychange",()=>{
+ if(document.hidden)stopLoop();
+ else if(currentGame&&modal.classList.contains("open")&&animationId===null){
+  lastFrame=0;
+  animationId=requestAnimationFrame(loop);
+ }
+});
+
+/* إغلاق بزر Escape */
+window.addEventListener("keydown",e=>{
+ if(e.key==="Escape"&&modal.classList.contains("open")&&!document.fullscreenElement){
+  closeGame();
+ }
+});
+
+/* التشغيل الأول */
+renderGames();
+</script>
+</body>
+</html>
