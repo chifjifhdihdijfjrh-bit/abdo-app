@@ -1,592 +1,475 @@
+
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#080b10">
-<title>PlayCloud PS - منصة الألعاب السحابية</title>
-
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>دولة الأورشاليم المستقلة | المنصة الرقمية</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-<link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;500;700;900&display=swap" rel="stylesheet">
-
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;900&display=swap" rel="stylesheet">
+<script>
+tailwind.config={
+theme:{extend:{colors:{
+gold:'#D4AF37',royal:'#1E3A8A',darkBg:'#0F172A',
+cardBg:'#1E293B',accent:'#3B82F6'
+},fontFamily:{cairo:['Cairo','sans-serif']}}}
+}
+</script>
 <style>
-*{box-sizing:border-box}
-body{
- margin:0;
- font-family:'Tajawal',sans-serif;
- background:#080b10;
- color:#e2e8f0;
- overflow-x:hidden
-}
-.ps-glow{box-shadow:0 0 25px #0070d155}
-.neon-text{text-shadow:0 0 12px #00a8ff99}
-.game-card{transition:.25s}
-.game-card:hover{
- transform:translateY(-6px);
- box-shadow:0 10px 30px #0070d155
-}
-button{touch-action:manipulation}
-::-webkit-scrollbar{width:7px}
-::-webkit-scrollbar-track{background:#0f172a}
-::-webkit-scrollbar-thumb{background:#0070d1;border-radius:8px}
-.category-btn.active{background:#2563eb;color:white}
-#gameModal{display:none}
-#gameModal.open{display:flex}
-
-/* ضبط الكانفاس ليكون في الوضع الطولي (Portrait) */
-#gameCanvas{
- width: 100%;
- max-width: 420px; /* تحديد عرض مناسب للشاشة الطويلة */
- height: 100%;
- display: block;
- margin: 0 auto;
- touch-action: none;
- image-rendering: pixelated;
-}
-
-.control-btn{
- width:48px;height:48px;border-radius:12px;
- background:#334155dd;color:white;font-size:20px;
- display:flex;align-items:center;justify-content:center;
- border:1px solid #64748b
-}
-.control-btn:active{background:#2563eb}
-.action-btn{
- width:48px;height:48px;border-radius:50%;
- color:white;font-size:20px;font-weight:bold;
- display:flex;align-items:center;justify-content:center
-}
-#mobileControls{pointer-events:none}
-#mobileControls button{pointer-events:auto;user-select:none}
+body{font-family:'Cairo',sans-serif;background:#0F172A;color:#F8FAFC}
+.gold-border{border-color:#D4AF37}
+.gold-text{color:#D4AF37}
+.gold-bg{background:#D4AF37}
+.glass-panel{background:rgba(30,41,59,.7);backdrop-filter:blur(10px);border:1px solid rgba(212,175,55,.2)}
+button:disabled{opacity:.45;cursor:not-allowed}
 </style>
 </head>
-
 <body class="min-h-screen flex flex-col">
 
-<header class="sticky top-0 z-40 bg-slate-900/95 backdrop-blur-md border-b border-blue-900/40 px-4 md:px-6 py-4">
-<div class="max-w-7xl mx-auto flex items-center justify-between gap-3">
-
+<nav class="glass-panel sticky top-0 z-50 px-4 md:px-6 py-4 flex justify-between items-center shadow-lg">
 <div class="flex items-center gap-3">
-<div class="bg-blue-600 text-white p-3 rounded-xl ps-glow">
-<i class="fa-brands fa-playstation text-2xl"></i>
-</div>
+<div class="w-10 h-10 rounded-full gold-bg flex items-center justify-center text-slate-900 text-xl">🏛️</div>
 <div>
-<h1 class="text-xl md:text-2xl font-black text-white neon-text">
-PLAY<span class="text-blue-500">CLOUD</span>
-</h1>
-<p class="text-xs text-blue-400 font-bold">منصة الألعاب السحابية</p>
+<h1 class="text-lg font-bold">دولة الأورشاليم المستقلة</h1>
+<p class="text-xs text-slate-400">شارع متاح للجميع بلا حدود</p>
 </div>
 </div>
+<div id="authSection" class="flex items-center gap-2"></div>
+</nav>
 
-<div class="hidden md:flex items-center bg-slate-800 rounded-full px-4 py-2 border border-slate-700 w-1/3">
-<i class="fa-solid fa-magnifying-glass text-slate-400 ml-2"></i>
-<input id="searchInput" type="search"
-placeholder="ابحث عن لعبتك المفضلة..."
-class="bg-transparent outline-none text-white text-sm w-full">
-</div>
-
-<div class="flex items-center gap-3">
-<div id="gamepadStatus" class="hidden lg:flex items-center gap-2 bg-slate-800 px-3 py-2 rounded-lg text-xs text-slate-400">
-<i class="fa-solid fa-gamepad" id="gamepadIcon"></i>
-<span id="gamepadText">انتظر ذراع التحكم</span>
-</div>
-<div class="flex items-center gap-2 bg-blue-600/20 border border-blue-500/30 px-3 py-2 rounded-full">
-<span class="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
-<span class="text-xs font-bold text-blue-300">المنصة جاهزة</span>
-</div>
-</div>
-</div>
-
-<div class="md:hidden mt-4">
-<div class="flex items-center bg-slate-800 rounded-xl px-4 py-3 border border-slate-700">
-<i class="fa-solid fa-magnifying-glass text-slate-400 ml-2"></i>
-<input id="mobileSearch" type="search"
-placeholder="ابحث عن لعبة..."
-class="bg-transparent outline-none text-white text-sm w-full">
-</div>
+<header class="relative py-16 px-6 text-center border-b border-slate-800">
+<div class="max-w-4xl mx-auto">
+<span class="inline-block px-4 py-1 rounded-full text-xs font-semibold gold-bg text-slate-900 mb-4">
+نظام الإدارة الجماعية • 4 وزارات فقط
+</span>
+<h2 class="text-4xl md:text-6xl font-black mb-4 gold-text">مجتمع مستقل.. مفتوح للجميع</h2>
+<p class="text-lg text-slate-300 max-w-2xl mx-auto">
+مرحباً بكم في منصة الشارع. لا وجود لرئيس، لا وجود للحدود المغلقة. الإدارة تتجدد شهرياً بالانتخاب المباشر بين أفراد الشارع.
+</p>
 </div>
 </header>
 
-<main class="container mx-auto px-4 py-7 flex-1 max-w-7xl">
-
-<section class="relative rounded-3xl overflow-hidden mb-9 bg-gradient-to-r from-blue-950 via-slate-900 to-indigo-950 border border-blue-500/20 p-7 md:p-12 flex flex-col md:flex-row items-center justify-between gap-7">
-<div class="space-y-4 max-w-xl relative z-10">
-<span class="bg-blue-600/30 text-blue-400 text-xs font-bold px-3 py-2 rounded-full border border-blue-500/30">
-PLAYCLOUD GAMING
-</span>
-<h2 class="text-3xl md:text-5xl font-black text-white leading-tight">
-عالم الألعاب يبدأ من هنا!
-</h2>
-<p class="text-slate-400 text-sm md:text-base">
-اكتشف مكتبة الألعاب واستمتع بالتجربة التجريبية مباشرة من متصفحك.
-</p>
-<button id="startBtn" class="bg-blue-600 hover:bg-blue-500 text-white font-bold px-6 py-3 rounded-xl transition ps-glow">
-<i class="fa-solid fa-play ml-2"></i>
-ابدأ اللعب الآن
+<section class="py-12 px-6 max-w-6xl mx-auto w-full">
+<h3 class="text-2xl font-bold mb-6"><i class="fa-solid fa-road gold-text"></i> خريطة الشارع (من أوله لآخره)</h3>
+<div class="glass-panel p-6 rounded-2xl">
+<div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+<button onclick="selectStreetPoint('بداية الشارع','مدخل الشارع الرئيسي، مفتوح بالكامل للجميع بدون أي بوابات أو قيود.')" class="p-4 rounded-xl bg-slate-800 text-right border border-slate-700">
+<div class="gold-text font-bold mb-1">🚪 أول الشارع</div>
+<div class="text-xs text-slate-300">المدخل المفتوح والمرحّب</div>
+</button>
+<button onclick="selectStreetPoint('وسط الشارع (الميدان)','الميدان الرئيسي والتجمع التجاري والخدماتي لأهالي الشارع.')" class="p-4 rounded-xl bg-slate-800 text-right border border-slate-700">
+<div class="gold-text font-bold mb-1">🏪 وسط الشارع</div>
+<div class="text-xs text-slate-300">الميدان والخدمات العامة</div>
+</button>
+<button onclick="selectStreetPoint('المنطقة السكنية','قلب الشارع حيث منازل الأهالي والمساحات المشتركة.')" class="p-4 rounded-xl bg-slate-800 text-right border border-slate-700">
+<div class="gold-text font-bold mb-1">🏠 المربع السكني</div>
+<div class="text-xs text-slate-300">منازل الجيران والتكافل</div>
+</button>
+<button onclick="selectStreetPoint('نهاية الشارع المفتوحة','نهاية الشارع المتصلة بالمناطق المجاورة بلا حواجز.')" class="p-4 rounded-xl bg-slate-800 text-right border border-slate-700">
+<div class="gold-text font-bold mb-1">♾️ آخر الشارع</div>
+<div class="text-xs text-slate-300">الامتداد المفتوح</div>
 </button>
 </div>
-<div class="text-blue-500/20 text-9xl hidden md:block">
-<i class="fa-brands fa-playstation"></i>
+<div id="streetPointDetails" class="mt-6 p-4 rounded-xl bg-slate-900 border border-slate-700 text-sm text-slate-300">
+<span class="gold-text font-bold">معلومات القطاع:</span> اضغط على أي جزء من الشارع.
+</div>
 </div>
 </section>
 
-<section class="mb-6">
-<h2 class="text-xl font-black text-white mb-4">
-<i class="fa-solid fa-layer-group text-blue-500 ml-2"></i>
-مكتبة الألعاب
-</h2>
-
-<div class="flex gap-2 overflow-x-auto pb-3" id="categories">
-<button data-category="all" class="category-btn active px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">الكل</button>
-<button data-category="action" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">أكشن ومغامرات</button>
-<button data-category="sports" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">كرة قدم ورياضة</button>
-<button data-category="racing" class="category-btn px-5 py-2.5 rounded-xl whitespace-nowrap bg-slate-800 text-slate-300">سباقات</button>
+<section class="py-10 px-6 max-w-6xl mx-auto w-full">
+<h3 class="text-2xl font-bold mb-6"><i class="fa-solid fa-user-tie gold-text"></i> الوزراء الحاليون لهذا الشهر</h3>
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+<div class="glass-panel p-5 rounded-xl text-center border-t-4 border-emerald-500">
+<i class="fa-solid fa-leaf text-3xl text-emerald-400 mb-3"></i>
+<h4 class="font-bold mb-1">وزارة البيئة والخدمات</h4>
+<p class="text-xs gold-text mb-3">الوزير الحالي: <span id="min1">أحمد محمود</span></p>
+<p class="text-xs text-slate-400">مسؤول الإضاءة والنظافة والتشجير</p>
+</div>
+<div class="glass-panel p-5 rounded-xl text-center border-t-4 border-rose-500">
+<i class="fa-solid fa-hand-holding-heart text-3xl text-rose-400 mb-3"></i>
+<h4 class="font-bold mb-1">وزارة التكافل الاجتماعي</h4>
+<p class="text-xs gold-text mb-3">الوزير الحالي: <span id="min2">سارة حسن</span></p>
+<p class="text-xs text-slate-400">مسؤولة الدعم والفعاليات الخيرية</p>
+</div>
+<div class="glass-panel p-5 rounded-xl text-center border-t-4 border-amber-500">
+<i class="fa-solid fa-volleyball-ball text-3xl text-amber-400 mb-3"></i>
+<h4 class="font-bold mb-1">وزارة الأنشطة والتعاون</h4>
+<p class="text-xs gold-text mb-3">الوزير الحالي: <span id="min3">محمود علي</span></p>
+<p class="text-xs text-slate-400">مسؤول الدورات الرياضية والمناسبات</p>
+</div>
+<div class="glass-panel p-5 rounded-xl text-center border-t-4 border-cyan-500">
+<i class="fa-solid fa-laptop-code text-3xl text-cyan-400 mb-3"></i>
+<h4 class="font-bold mb-1">وزارة الإعلام والتطوير</h4>
+<p class="text-xs gold-text mb-3">الوزير الحالي: <span id="min4">عبده (مطور المنصة)</span></p>
+<p class="text-xs text-slate-400">مسؤول الموقع والإعلانات</p>
+</div>
 </div>
 </section>
 
-<div id="resultCount" class="text-xs text-slate-500 mb-4"></div>
-
-<section id="gamesContainer" class="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-5"></section>
-
-<div id="emptyMessage" class="hidden text-center py-16 text-slate-500">
-<i class="fa-solid fa-gamepad text-4xl mb-4"></i>
-<p>لم يتم العثور على ألعاب مطابقة لبحثك.</p>
-</div>
-
-<section class="mt-10 bg-slate-900 border border-slate-800 rounded-2xl p-5">
-<h3 class="font-bold text-white mb-2">
-<i class="fa-solid fa-circle-info text-blue-400 ml-2"></i>
-معلومات عن المنصة
-</h3>
-<p class="text-sm text-slate-400 leading-7">
-هذه النسخة تحتوي على واجهة مكتبة ألعاب ومحرك تجريبي يعمل داخل المتصفح. تشغيل ألعاب PlayStation الأصلية عن بُعد يتطلب خدمة بث ألعاب وخادماً متصلاً بها.
-</p>
-</section>
-</main>
-
-<!-- نافذة اللعب -->
-<div id="gameModal" class="fixed inset-0 z-50 bg-black/95 backdrop-blur-xl flex-col p-3 md:p-6">
-
-<div class="flex items-center justify-between border-b border-slate-800 pb-3">
-<div class="flex items-center gap-3">
-<i class="fa-brands fa-playstation text-blue-500 text-2xl"></i>
+<section class="py-12 px-6 max-w-6xl mx-auto w-full">
+<div class="glass-panel p-8 rounded-2xl">
+<div class="flex flex-col md:flex-row justify-between items-center mb-8 border-b border-slate-700 pb-6 gap-4">
 <div>
-<h3 id="modalGameTitle" class="font-bold text-white">اللعبة</h3>
-<p class="text-xs text-slate-500">وضع الشاشة الطويلة (Portrait Mode)</p>
+<h3 class="text-2xl font-bold gold-text mb-1">🗳️ نظام الانتخابات الشهرية</h3>
+<p class="text-sm text-slate-300">التصويت مفتوح لمدة 24 ساعة فقط.</p>
+</div>
+<div class="text-center bg-slate-900 px-6 py-3 rounded-xl border gold-border">
+<div class="text-xs text-slate-400 mb-1">الوقت المتبقي لغلق التصويت:</div>
+<div id="electionTimer" class="text-2xl font-black gold-text">23:59:59</div>
 </div>
 </div>
+<div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+<div class="bg-slate-900/60 p-6 rounded-xl border border-slate-700">
+<h4 class="font-bold mb-4 text-lg">📝 الترشح لأحد الوزارات</h4>
+<form id="candidateForm" class="space-y-4">
+<div>
+<label class="block text-xs text-slate-400 mb-1">اسم المرشح</label>
+<input type="text" id="candNameInput" readonly required placeholder="سجل دخولك أولاً" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm">
+</div>
+<div>
+<label class="block text-xs text-slate-400 mb-1">اختر الوزارة</label>
+<select id="candMinistry" required class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-white">
+<option value="وزارة البيئة والخدمات">وزارة البيئة والخدمات</option>
+<option value="وزارة التكافل الاجتماعي">وزارة التكافل الاجتماعي</option>
+<option value="وزارة الأنشطة والتعاون">وزارة الأنشطة والتعاون</option>
+<option value="وزارة الإعلام والتطوير">وزارة الإعلام والتطوير</option>
+</select>
+</div>
+<div>
+<label class="block text-xs text-slate-400 mb-1">برنامجك/فكرتك للشارع</label>
+<textarea id="candProgram" rows="3" required placeholder="ما الذي ستقدمه للشارع؟" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm"></textarea>
+</div>
+<button type="submit" class="w-full gold-bg text-slate-900 font-bold py-3 rounded-lg">تأكيد الترشح 🚀</button>
+</form>
+</div>
+<div>
+<h4 class="font-bold mb-4 text-lg">📊 قائمة المرشحين للتصويت</h4>
+<div id="candidatesList" class="space-y-4 max-h-[380px] overflow-y-auto pr-2"></div>
+</div>
+</div>
+</div>
+</section>
 
-<div class="flex items-center gap-4">
-<button id="fullscreenBtn" class="text-slate-400 hover:text-white text-xl" title="ملء الشاشة">
-<i class="fa-solid fa-expand"></i>
-</button>
-<button id="closeBtn" class="text-red-500 hover:text-red-400 text-2xl" title="إغلاق">
-<i class="fa-solid fa-xmark"></i>
-</button>
+<section class="py-12 px-6 max-w-6xl mx-auto w-full">
+<div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+<div class="glass-panel p-6 rounded-xl">
+<h3 class="text-xl font-bold mb-4 gold-text"><i class="fa-solid fa-triangle-exclamation"></i> إبلاغ عن مشكلة في الشارع</h3>
+<form id="reportForm" class="space-y-4">
+<div>
+<label class="block text-xs text-slate-400 mb-1">مكان المشكلة</label>
+<select id="reportLocation" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-white">
+<option>أول الشارع</option><option>منتصف الشارع</option><option>آخر الشارع</option>
+</select>
+</div>
+<div>
+<label class="block text-xs text-slate-400 mb-1">الوزارة المختصة</label>
+<select id="reportMinistry" class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm text-white">
+<option>وزارة البيئة والخدمات</option>
+<option>وزارة التكافل الاجتماعي</option>
+<option>وزارة الأنشطة والتعاون</option>
+<option>وزارة الإعلام والتطوير</option>
+</select>
+</div>
+<div>
+<label class="block text-xs text-slate-400 mb-1">تفاصيل المشكلة</label>
+<textarea id="reportDetails" rows="3" required placeholder="اشرح المشكلة..." class="w-full bg-slate-800 border border-slate-700 rounded-lg p-3 text-sm"></textarea>
+</div>
+<button type="submit" class="w-full bg-blue-600 font-bold py-3 rounded-lg">إرسال البلاغ للوزارة المختصة 📢</button>
+</form>
+</div>
+<div class="glass-panel p-6 rounded-xl">
+<h3 class="text-xl font-bold mb-4">📋 متابعة بلاغات الشارع الحالية</h3>
+<div id="reportsFeed" class="space-y-3 max-h-[350px] overflow-y-auto"></div>
 </div>
 </div>
+</section>
 
-<div id="gameArea" class="relative flex-1 min-h-0 my-3 bg-slate-950 rounded-2xl overflow-hidden border border-slate-800 flex items-center justify-center">
-<canvas id="gameCanvas"></canvas>
+<section class="py-12 px-6 max-w-4xl mx-auto w-full">
+<h3 class="text-2xl font-bold text-center mb-8 gold-text">❓ الأسئلة الشائعة حول المشروع</h3>
+<div class="space-y-4">
+<div class="glass-panel p-4 rounded-xl"><h4 class="font-bold mb-2">كيف تعمل الدولة بدون رئيس؟</h4><p class="text-sm text-slate-300">تدار الدولة عبر 4 وزارات فقط، يمثل كل وزارة مواطن منتخب شهرياً من أهالي الشارع للقيام بالمهام الخدمية والاجتماعية.</p></div>
+<div class="glass-panel p-4 rounded-xl"><h4 class="font-bold mb-2">هل هناك حدود جغرافية أو قيود للدخول؟</h4><p class="text-sm text-slate-300">لا، الشارع مفتوح تماماً للجميع بدون أسوار أو بوابات.</p></div>
+<div class="glass-panel p-4 rounded-xl"><h4 class="font-bold mb-2">كيف يتم حفظ تسجيل الدخول؟</h4><p class="text-sm text-slate-300">يقوم الموقع بحفظ اسمك تلقائياً على جهازك.</p></div>
+</div>
+</section>
 
-<div id="mobileControls" class="absolute bottom-4 left-3 right-3 flex justify-between items-end md:hidden">
-<div class="grid grid-cols-3 gap-1">
-<div></div>
-<button class="control-btn" data-action="UP"><i class="fa-solid fa-caret-up"></i></button>
-<div></div>
-<button class="control-btn" data-action="LEFT"><i class="fa-solid fa-caret-left"></i></button>
-<div></div>
-<button class="control-btn" data-action="RIGHT"><i class="fa-solid fa-caret-right"></i></button>
-<div></div>
-<button class="control-btn" data-action="DOWN"><i class="fa-solid fa-caret-down"></i></button>
-<div></div>
-</div>
-
-<div class="grid grid-cols-2 gap-2">
-<button class="action-btn bg-blue-600" data-action="ACTION_X">✕</button>
-<button class="action-btn bg-red-600" data-action="ACTION_O">◯</button>
-<button class="action-btn bg-pink-600" data-action="ACTION_SQ">▢</button>
-<button class="action-btn bg-green-600" data-action="ACTION_TR">△</button>
-</div>
-</div>
-
-<div class="absolute top-3 right-3 bg-black/70 rounded-lg px-3 py-2 text-xs text-white">
-النقاط: <span id="score">0</span> | <span class="text-blue-400 font-mono">Portrait Mode</span>
-</div>
-</div>
-
-<div class="flex items-center justify-between gap-2 text-xs text-slate-400 border-t border-slate-800 pt-3">
-<p>الأسهم للتحرك و Space لجمع النجوم. يدعم ذراع التحكم.</p>
-<button id="restartBtn" class="bg-blue-600 px-4 py-2 rounded-lg text-white font-bold">
-<i class="fa-solid fa-rotate-right ml-1"></i> إعادة اللعب
-</button>
-</div>
-</div>
-
-<footer class="bg-slate-900/60 border-t border-slate-800 py-6 text-center text-slate-500 text-sm">
-تم التطوير بواسطة <span class="text-blue-400 font-bold">عبده</span>
-© 2026 - PlayCloud PS
+<footer class="mt-auto py-6 text-center text-xs text-slate-500 border-t border-slate-800">
+دولة الأورشاليم المستقلة • منصة الشارع المفتوحة • تصميم وتطوير عبده
 </footer>
 
 <script>
-"use strict";
+// مفاتيح التخزين
+const KEYS={
+user:'orshalim_user',
+candidates:'orshalim_candidates',
+reports:'orshalim_reports',
+votes:'orshalim_votes',
+timer:'orshalim_election_end',
+ministers:'orshalim_ministers'
+};
 
-/* قاعدة الألعاب */
-const games = [
-{id:1,title:"eFootball 2026",category:"sports",rating:"4.9",icon:"fa-futbol",bg:"from-blue-600 to-indigo-900",color:"#0070d1"},
-{id:2,title:"Spider-Man PS5",category:"action",rating:"4.8",icon:"fa-spider",bg:"from-red-600 to-slate-900",color:"#e11d48"},
-{id:3,title:"God of War Ragnarök",category:"action",rating:"5.0",icon:"fa-shield-halved",bg:"from-slate-700 to-blue-950",color:"#38bdf8"},
-{id:4,title:"Need for Speed Unbound",category:"racing",rating:"4.7",icon:"fa-car-side",bg:"from-amber-500 to-slate-900",color:"#f59e0b"},
-{id:5,title:"EA Sports FC 26",category:"sports",rating:"4.9",icon:"fa-trophy",bg:"from-emerald-600 to-slate-900",color:"#10b981"},
-{id:6,title:"GTA V Cloud Edition",category:"action",rating:"4.9",icon:"fa-mask",bg:"from-purple-600 to-slate-900",color:"#a855f7"},
-{id:7,title:"Gran Turismo 7",category:"racing",rating:"4.8",icon:"fa-gauge-high",bg:"from-cyan-600 to-slate-900",color:"#06b6d4"},
-{id:8,title:"Tekken 8",category:"action",rating:"4.7",icon:"fa-hand-fist",bg:"from-rose-600 to-slate-900",color:"#f43f5e"}
+function load(key,fallback){
+try{
+const value=localStorage.getItem(key);
+return value===null?fallback:JSON.parse(value);
+}catch(e){return fallback}
+}
+function save(key,value){
+localStorage.setItem(key,JSON.stringify(value));
+}
+
+let currentUser=localStorage.getItem(KEYS.user)||null;
+let candidates=load(KEYS.candidates,[
+{id:1,name:'محمد صابر',ministry:'وزارة البيئة والخدمات',program:'تركيب كشافات ليد إضافية في منتصف الشارع',votes:12},
+{id:2,name:'خالد عبد السلام',ministry:'وزارة التكافل الاجتماعي',program:'توفير صندوق تكافل لمساعدة الأسر المستحقة',votes:19}
+]);
+let reports=load(KEYS.reports,[
+{id:1,location:'أول الشارع',ministry:'وزارة البيئة والخدمات',details:'عطل في أحد كشافات الإنارة الجانبية',status:'قيد المتابعة',createdAt:Date.now()}
+]);
+let votes=load(KEYS.votes,{});
+let ministers=load(KEYS.ministers,[
+'أحمد محمود','سارة حسن','محمود علي','عبده (مطور المنصة)'
+]);
+
+const ministries=[
+'وزارة البيئة والخدمات',
+'وزارة التكافل الاجتماعي',
+'وزارة الأنشطة والتعاون',
+'وزارة الإعلام والتطوير'
 ];
 
-/* عناصر الصفحة */
-const $ = id => document.getElementById(id);
-const container = $("gamesContainer");
-const modal = $("gameModal");
-const canvas = $("gameCanvas");
-const ctx = canvas.getContext("2d");
-
-let selectedCategory = "all";
-let searchTerm = "";
-let currentGame = null;
-let animationId = null;
-let lastFrame = 0;
-let player = {x:100,y:100,size:14,speed:3.5};
-let star = {x:200,y:150,size:8};
-let score = 0;
-let keys = {};
-let gamepadConnected = false;
-let audioCtx = null;
-
-/* صوت بسيط */
-function beep(freq=440,duration=.07){
- try{
-  audioCtx ||= new (window.AudioContext || window.webkitAudioContext)();
-  if(audioCtx.state==="suspended") audioCtx.resume();
-  const osc=audioCtx.createOscillator();
-  const gain=audioCtx.createGain();
-  osc.connect(gain);
-  gain.connect(audioCtx.destination);
-  osc.frequency.value=freq;
-  gain.gain.setValueAtTime(.07,audioCtx.currentTime);
-  gain.gain.exponentialRampToValueAtTime(.001,audioCtx.currentTime+duration);
-  osc.start();
-  osc.stop(audioCtx.currentTime+duration);
- }catch(e){}
+function escapeHTML(value){
+return String(value).replace(/[&<>"']/g,char=>({
+'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+}[char]));
 }
 
-/* عرض الألعاب */
-function renderGames(){
- const filtered=games.filter(game=>{
-  const categoryMatch=selectedCategory==="all" || game.category===selectedCategory;
-  const searchMatch=game.title.toLowerCase().includes(searchTerm.toLowerCase());
-  return categoryMatch && searchMatch;
- });
+function init(){
+renderAuth();
+renderCandidates();
+renderReports();
+renderMinisters();
+initializeElection();
+}
+document.addEventListener('DOMContentLoaded',init);
 
- container.innerHTML="";
- $("resultCount").textContent="عدد الألعاب: "+filtered.length;
- $("emptyMessage").classList.toggle("hidden",filtered.length!==0);
+function renderAuth(){
+const container=document.getElementById('authSection');
+const candidateInput=document.getElementById('candNameInput');
 
- filtered.forEach(game=>{
-  const card=document.createElement("article");
-  card.className="game-card bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden cursor-pointer";
-
-  const image=document.createElement("div");
-  image.className="h-44 bg-gradient-to-br "+game.bg+" flex items-center justify-center relative";
-
-  const icon=document.createElement("i");
-  icon.className="fa-solid "+game.icon+" text-6xl text-white/80";
-  image.appendChild(icon);
-
-  const rating=document.createElement("span");
-  rating.className="absolute top-3 left-3 bg-black/70 text-amber-400 text-xs px-3 py-1 rounded-full";
-  rating.innerHTML='<i class="fa-solid fa-star"></i> '+game.rating;
-  image.appendChild(rating);
-
-  const info=document.createElement("div");
-  info.className="p-4 flex items-center justify-between gap-2";
-
-  const text=document.createElement("div");
-  const title=document.createElement("h3");
-  title.className="font-bold text-white text-base";
-  title.textContent=game.title;
-
-  const desc=document.createElement("p");
-  desc.className="text-xs text-slate-500 mt-1";
-  desc.textContent="تجربة متصفح تجريبية";
-
-  text.append(title,desc);
-
-  const button=document.createElement("button");
-  button.className="bg-blue-600/20 text-blue-400 p-3 rounded-xl";
-  button.innerHTML='<i class="fa-solid fa-play"></i>';
-  button.setAttribute("aria-label","ابدأ اللعبة");
-
-  info.append(text,button);
-  card.append(image,info);
-  card.addEventListener("click",()=>launchGame(game));
-  container.appendChild(card);
- });
+if(currentUser){
+container.innerHTML=`
+<span class="text-sm font-bold gold-text">👤 ${escapeHTML(currentUser)}</span>
+<button onclick="logout()" class="text-xs bg-slate-800 px-3 py-2 rounded">خروج</button>`;
+candidateInput.value=currentUser;
+}else{
+container.innerHTML=`
+<input id="usernameInput" maxlength="30" type="text" placeholder="اكتب اسمك..." class="bg-slate-800 border border-slate-700 text-xs text-white p-2 rounded w-28 sm:w-40">
+<button onclick="login()" class="gold-bg text-slate-900 font-bold text-xs px-3 py-2 rounded">دخول</button>`;
+candidateInput.value='';
+}
 }
 
-/* البحث */
-function updateSearch(value){
- searchTerm=value.trim();
- $("searchInput").value=value;
- $("mobileSearch").value=value;
- renderGames();
+function login(){
+const input=document.getElementById('usernameInput');
+const name=input?.value.trim();
+if(!name){alert('اكتب اسمك أولاً');return}
+currentUser=name;
+localStorage.setItem(KEYS.user,currentUser);
+renderAuth();
+alert('أهلاً بك يا '+currentUser);
 }
-$("searchInput").addEventListener("input",e=>updateSearch(e.target.value));
-$("mobileSearch").addEventListener("input",e=>updateSearch(e.target.value));
 
-/* التصنيفات */
-document.querySelectorAll(".category-btn").forEach(button=>{
- button.addEventListener("click",()=>{
-  selectedCategory=button.dataset.category;
-  document.querySelectorAll(".category-btn").forEach(b=>b.classList.remove("active"));
-  button.classList.add("active");
-  beep(600);
-  renderGames();
- });
+function logout(){
+localStorage.removeItem(KEYS.user);
+currentUser=null;
+renderAuth();
+}
+
+function selectStreetPoint(title,description){
+document.getElementById('streetPointDetails').innerHTML=
+`<span class="gold-text font-bold">${escapeHTML(title)}:</span> ${escapeHTML(description)}`;
+}
+
+// الانتخابات: مدة 24 ساعة من وقت بدء الجولة
+let electionInterval=null;
+function initializeElection(){
+let end=Number(localStorage.getItem(KEYS.timer));
+if(!end || !Number.isFinite(end)){
+end=Date.now()+24*60*60*1000;
+localStorage.setItem(KEYS.timer,String(end));
+}
+updateElectionTimer();
+if(electionInterval)clearInterval(electionInterval);
+electionInterval=setInterval(updateElectionTimer,1000);
+}
+
+function updateElectionTimer(){
+let end=Number(localStorage.getItem(KEYS.timer));
+let remaining=end-Date.now();
+
+if(remaining<=0){
+document.getElementById('electionTimer').textContent='انتهى التصويت';
+finishElection();
+return;
+}
+const hours=Math.floor(remaining/3600000);
+const minutes=Math.floor((remaining%3600000)/60000);
+const seconds=Math.floor((remaining%60000)/1000);
+document.getElementById('electionTimer').textContent=
+[hours,minutes,seconds].map(n=>String(n).padStart(2,'0')).join(':');
+}
+
+function finishElection(){
+if(localStorage.getItem('orshalim_election_finished')==='yes')return;
+localStorage.setItem('orshalim_election_finished','yes');
+
+ministries.forEach((ministry,index)=>{
+const eligible=candidates.filter(c=>c.ministry===ministry);
+if(eligible.length){
+eligible.sort((a,b)=>b.votes-a.votes);
+ministers[index]=eligible[0].name;
+}
+});
+save(KEYS.ministers,ministers);
+renderMinisters();
+alert('انتهت الانتخابات وتم تحديث أسماء الوزراء حسب النتائج.');
+}
+
+function renderMinisters(){
+for(let i=0;i<4;i++){
+const element=document.getElementById('min'+(i+1));
+if(element)element.textContent=ministers[i];
+}
+}
+
+document.getElementById('candidateForm').addEventListener('submit',function(e){
+e.preventDefault();
+if(!currentUser){
+alert('يرجى تسجيل الدخول أولاً');
+return;
+}
+if(Date.now()>=Number(localStorage.getItem(KEYS.timer))){
+alert('انتهى وقت الترشح والتصويت');
+return;
+}
+const ministry=document.getElementById('candMinistry').value;
+const program=document.getElementById('candProgram').value.trim();
+
+if(candidates.some(c=>c.name===currentUser&&c.ministry===ministry)){
+alert('أنت مسجل بالفعل في هذه الوزارة');
+return;
+}
+if(!program){alert('اكتب برنامجك الانتخابي');return}
+
+candidates.push({
+id:Date.now(),name:currentUser,ministry,program,votes:0
+});
+save(KEYS.candidates,candidates);
+renderCandidates();
+this.reset();
+document.getElementById('candNameInput').value=currentUser;
+alert('تم تسجيل ترشحك بنجاح!');
 });
 
-/* فتح اللعبة */
-function launchGame(game){
- stopLoop();
- currentGame=game;
- $("modalGameTitle").textContent=game.title;
- modal.classList.add("open");
- modal.setAttribute("aria-hidden","false");
- resizeCanvas();
- resetGame();
- lastFrame=0;
- animationId=requestAnimationFrame(loop);
+function renderCandidates(){
+const list=document.getElementById('candidatesList');
+if(!candidates.length){
+list.innerHTML='<p class="text-slate-400 text-sm">لا يوجد مرشحون حتى الآن.</p>';
+return;
+}
+list.innerHTML=candidates.map(candidate=>{
+const voted=currentUser&&votes[currentUser]===candidate.id;
+const ended=Date.now()>=Number(localStorage.getItem(KEYS.timer));
+return `
+<div class="bg-slate-900 p-4 rounded-xl border border-slate-700">
+<div class="flex justify-between gap-2">
+<strong class="gold-text">${escapeHTML(candidate.name)}</strong>
+<span class="text-xs text-slate-400">${escapeHTML(candidate.ministry)}</span>
+</div>
+<p class="text-sm text-slate-300 mt-2">${escapeHTML(candidate.program)}</p>
+<div class="flex justify-between items-center mt-3">
+<span class="text-xs text-slate-400">🗳️ ${candidate.votes} صوت</span>
+<button onclick="voteCandidate(${Number(candidate.id)})"
+${!currentUser||voted||ended?'disabled':''}
+class="gold-bg text-slate-900 px-4 py-2 rounded-lg text-xs font-bold">
+${voted?'تم التصويت':ended?'انتهى التصويت':'صوّت'}
+</button>
+</div>
+</div>`;
+}).join('');
 }
 
-/* إيقاف الرسم */
-function stopLoop(){
- if(animationId!==null){
-  cancelAnimationFrame(animationId);
-  animationId=null;
- }
+function voteCandidate(id){
+if(!currentUser){alert('سجل دخولك أولاً');return}
+if(Date.now()>=Number(localStorage.getItem(KEYS.timer))){
+alert('انتهى التصويت');return;
+}
+if(votes[currentUser]){
+alert('لقد صوتّ بالفعل في هذه الجولة');return;
+}
+const candidate=candidates.find(c=>c.id===id);
+if(!candidate){alert('المرشح غير موجود');return}
+
+candidate.votes++;
+votes[currentUser]=id;
+save(KEYS.candidates,candidates);
+save(KEYS.votes,votes);
+renderCandidates();
+alert('تم تسجيل صوتك بنجاح!');
 }
 
-/* إعادة اللعبة */
-function resetGame(){
- player={x:canvas.width/2,y:canvas.height/2,size:14,speed:3.5};
- score=0;
- $("score").textContent=score;
- randomStar();
+document.getElementById('reportForm').addEventListener('submit',function(e){
+e.preventDefault();
+const details=document.getElementById('reportDetails').value.trim();
+if(!details){alert('اكتب تفاصيل المشكلة');return}
+const report={
+id:Date.now(),
+location:document.getElementById('reportLocation').value,
+ministry:document.getElementById('reportMinistry').value,
+details,
+status:'قيد المتابعة',
+createdAt:Date.now(),
+reporter:currentUser||'زائر'
+};
+reports.unshift(report);
+save(KEYS.reports,reports);
+renderReports();
+this.reset();
+alert('تم إرسال البلاغ بنجاح');
+});
+
+function updateReportStatus(id,status){
+const report=reports.find(r=>r.id===id);
+if(!report)return;
+report.status=status;
+save(KEYS.reports,reports);
+renderReports();
 }
 
-/* ضبط مساحة الرسم: تحويل الشاشة لوضع الطولي Portrait (ارتفاع أكبر من العرض) */
-function resizeCanvas(){
- const targetWidth = 360; // العرض الثابت في الوضع الطولي
- const targetHeight = 640; // الارتفاع الطولي المخصص للموبايل والشاشات الطويلة
- 
- canvas.width = targetWidth;
- canvas.height = targetHeight;
- 
- ctx.imageSmoothingEnabled = false;
- player.x = canvas.width / 2;
- player.y = canvas.height / 2;
+function renderReports(){
+const feed=document.getElementById('reportsFeed');
+if(!reports.length){
+feed.innerHTML='<p class="text-sm text-slate-400">لا توجد بلاغات حالياً.</p>';
+return;
 }
-
-/* نجمة جديدة */
-function randomStar(){
- star={
-  x:20+Math.random()*(canvas.width-40),
-  y:20+Math.random()*(canvas.height-40),
-  size:8
- };
+feed.innerHTML=reports.map(report=>`
+<div class="bg-slate-900 p-4 rounded-xl border border-slate-700">
+<div class="flex justify-between gap-2 mb-2">
+<strong class="gold-text text-sm">${escapeHTML(report.location)}</strong>
+<span class="text-xs text-slate-400">${escapeHTML(report.status)}</span>
+</div>
+<p class="text-xs text-slate-300 mb-2">${escapeHTML(report.ministry)}</p>
+<p class="text-sm text-slate-200">${escapeHTML(report.details)}</p>
+<p class="text-xs text-slate-500 mt-2">مقدم البلاغ: ${escapeHTML(report.reporter||'زائر')}</p>
+${currentUser?`
+<div class="flex gap-2 mt-3 flex-wrap">
+<button onclick="updateReportStatus(${Number(report.id)},'قيد المتابعة')" class="bg-blue-700 text-xs px-3 py-2 rounded">قيد المتابعة</button>
+<button onclick="updateReportStatus(${Number(report.id)},'تم الحل')" class="bg-emerald-700 text-xs px-3 py-2 rounded">تم الحل</button>
+</div>`:''}
+</div>`).join('');
 }
-
-/* الرسم بالشاشة الطويلة */
-function loop(time){
- if(!currentGame || !modal.classList.contains("open")) return;
-
- const width = canvas.width;
- const height = canvas.height;
- const delta=lastFrame?Math.min((time-lastFrame)/16.67,2):1;
- lastFrame=time;
-
- ctx.clearRect(0,0,width,height);
- ctx.fillStyle="#090d16";
- ctx.fillRect(0,0,width,height);
-
- /* شبكة الخلفية */
- ctx.strokeStyle="#1e293b";
- ctx.lineWidth=1;
- for(let x=0;x<width;x+=30){
-  ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,height);ctx.stroke();
- }
- for(let y=0;y<height;y+=30){
-  ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(width,y);ctx.stroke();
- }
-
- /* التحكم بالكيبورد */
- let dx=0,dy=0;
- if(keys.ArrowLeft||keys.a)dx--;
- if(keys.ArrowRight||keys.d)dx++;
- if(keys.ArrowUp||keys.w)dy--;
- if(keys.ArrowDown||keys.s)dy++;
-
- /* قراءة ذراع التحكم */
- const pads=navigator.getGamepads?navigator.getGamepads():[];
- const pad=pads?Array.from(pads).find(p=>p&&p.connected):null;
- if(pad){
-  if(Math.abs(pad.axes[0]||0)>.2)dx=pad.axes[0];
-  if(Math.abs(pad.axes[1]||0)>.2)dy=pad.axes[1];
-  if(pad.buttons[0]?.pressed)collectStar();
- }
-
- const length=Math.hypot(dx,dy)||1;
- player.x+=(dx/length)*player.speed*delta;
- player.y+=(dy/length)*player.speed*delta;
-
- player.x=Math.max(player.size,Math.min(width-player.size,player.x));
- player.y=Math.max(player.size,Math.min(height-player.size,player.y));
-
- /* النجمة */
- ctx.save();
- ctx.fillStyle="#facc15";
- ctx.font="20px Arial";
- ctx.textAlign="center";
- ctx.fillText("★",star.x,star.y+7);
- ctx.restore();
-
- /* اللاعب */
- ctx.save();
- ctx.fillStyle=currentGame.color;
- ctx.beginPath();
- ctx.arc(player.x,player.y,player.size,0,Math.PI*2);
- ctx.fill();
- ctx.fillStyle="#fff";
- ctx.font="bold 9px Tajawal";
- ctx.textAlign="center";
- ctx.textBaseline="middle";
- ctx.fillText("PS",player.x,player.y);
- ctx.restore();
-
- /* جمع النجمة */
- if(Math.hypot(player.x-star.x,player.y-star.y)<player.size+star.size){
-  collectStar();
- }
-
- animationId=requestAnimationFrame(loop);
-}
-
-/* جمع النجوم */
-function collectStar(){
- score++;
- $("score").textContent=score;
- beep(800,.08);
- randomStar();
-}
-
-/* التحكم باللمس */
-function touchAction(action){
- const step=18;
- if(action==="UP")player.y-=step;
- if(action==="DOWN")player.y+=step;
- if(action==="LEFT")player.x-=step;
- if(action==="RIGHT")player.x+=step;
- if(action.startsWith("ACTION"))collectStar();
- beep(500,.04);
-}
-
-document.querySelectorAll("[data-action]").forEach(button=>{
- button.addEventListener("pointerdown",e=>{
-  e.preventDefault();
-  touchAction(button.dataset.action);
- });
-});
-
-/* الكيبورد */
-window.addEventListener("keydown",e=>{
- if(!modal.classList.contains("open"))return;
- if(["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"," "].includes(e.key))e.preventDefault();
- keys[e.key]=true;
- if(e.key===" " && !e.repeat)collectStar();
-});
-window.addEventListener("keyup",e=>{keys[e.key]=false});
-
-/* ذراع التحكم */
-window.addEventListener("gamepadconnected",e=>{
- gamepadConnected=true;
- $("gamepadText").textContent="تم توصيل الذراع";
- $("gamepadIcon").classList.add("text-green-400");
- beep(700);
-});
-window.addEventListener("gamepaddisconnected",()=>{
- gamepadConnected=false;
- $("gamepadText").textContent="تم فصل الذراع";
- $("gamepadIcon").classList.remove("text-green-400");
-});
-
-/* إغلاق اللعبة */
-function closeGame(){
- stopLoop();
- currentGame=null;
- keys={};
- modal.classList.remove("open");
- modal.setAttribute("aria-hidden","true");
- beep(300);
-}
-$("closeBtn").addEventListener("click",closeGame);
-
-/* إعادة اللعب */
-$("restartBtn").addEventListener("click",()=>{
- resetGame();
- beep(500);
-});
-
-/* ملء الشاشة */
-$("fullscreenBtn").addEventListener("click",async()=>{
- try{
-  if(!document.fullscreenElement){
-   await $("gameArea").requestFullscreen();
-  }else{
-   await document.exitFullscreen();
-  }
- }catch(e){
-  alert("متصفحك لا يدعم وضع ملء الشاشة.");
- }
-});
-
-/* تغيير حجم الشاشة */
-window.addEventListener("resize",()=>{
- if(modal.classList.contains("open"))resizeCanvas();
-});
-
-/* زر البداية */
-$("startBtn").addEventListener("click",()=>{
- $("gamesContainer").scrollIntoView({behavior:"smooth"});
-});
-
-/* منع استمرار اللعبة عند إخفاء الصفحة */
-document.addEventListener("visibilitychange",()=>{
- if(document.hidden)stopLoop();
- else if(currentGame&&modal.classList.contains("open")&&animationId===null){
-  lastFrame=0;
-  animationId=requestAnimationFrame(loop);
- }
-});
-
-/* إغلاق بزر Escape */
-window.addEventListener("keydown",e=>{
- if(e.key==="Escape"&&modal.classList.contains("open")&&!document.fullscreenElement){
-  closeGame();
- }
-});
-
-/* التشغيل الأول */
-renderGames();
 </script>
 </body>
 </html>
